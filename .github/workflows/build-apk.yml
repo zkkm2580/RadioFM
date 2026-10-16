@@ -29,14 +29,13 @@ jobs:
 
     - name: 编译 Debug APK
       run: |
-        gradle assembleDebug --stacktrace --no-daemon > gradle_build.log 2>&1 || (tail -n 100 gradle_build.log && exit 1)
-
-    - name: 上传构建失败日志
-      if: failure()
-      uses: actions/upload-artifact@v4
-      with:
-        name: gradle-build-log
-        path: gradle_build.log
+        if ! gradle assembleDebug --stacktrace --no-daemon > gradle_build.log 2>&1; then
+          echo "### 编译失败详情" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -n 80 gradle_build.log >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
 
     - name: 整理发布 APK 文件
       id: release_apk
