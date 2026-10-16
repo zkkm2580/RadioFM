@@ -12,36 +12,37 @@ object RadioRepository {
     const val RADIO_SOURCE_URL = "http://zj.537224.xyz/radio.txt"
 
     /**
-     * 默认内置预设频道（与 http://zj.537224.xyz/radio.txt 保持一致，离线/首次进入时兜底秒开）
+     * 默认内置预设频道（来源与 http://zj.537224.xyz/radio.txt 保持一致）
+     * 注意：喜马拉雅电台的 443 端口未开放，必须使用 http 协议
      */
     fun getPresetChannels(): List<RadioChannel> = listOf(
         RadioChannel(
             id = "radio_1",
             name = "亚洲粤语台",
             category = "网络电台",
-            frequency = "流行音乐",
-            streamUrl = "https://live.ximalaya.com/radio-first-page-app/live/999/64.m3u8"
+            frequency = "网络台",
+            streamUrl = "http://live.ximalaya.com/radio-first-page-app/live/999/64.m3u8"
         ),
         RadioChannel(
             id = "radio_2",
             name = "亚洲音乐台",
             category = "网络电台",
-            frequency = "流行音乐",
-            streamUrl = "https://live.ximalaya.com/radio-first-page-app/live/764/64.m3u8"
+            frequency = "网络台",
+            streamUrl = "http://live.ximalaya.com/radio-first-page-app/live/764/64.m3u8"
         ),
         RadioChannel(
             id = "radio_3",
             name = "亚洲经典台",
             category = "网络电台",
-            frequency = "经典怀旧",
-            streamUrl = "https://live.ximalaya.com/radio-first-page-app/live/1005/64.m3u8"
+            frequency = "网络台",
+            streamUrl = "http://live.ximalaya.com/radio-first-page-app/live/1005/64.m3u8"
         ),
         RadioChannel(
             id = "radio_4",
             name = "HD音乐台",
             category = "网络电台",
-            frequency = "高清音频",
-            streamUrl = "https://live.ximalaya.com/radio-first-page-app/live/1427/64.m3u8"
+            frequency = "网络台",
+            streamUrl = "http://live.ximalaya.com/radio-first-page-app/live/1427/64.m3u8"
         ),
         RadioChannel(
             id = "radio_5",
@@ -74,11 +75,27 @@ object RadioRepository {
     )
 
     /**
-     * 解析形如 "频道名称,流地址" 或 带分组 "#genre#" 的 txt 列表
+     * 自动处理 URL 兼容性（如喜马拉雅 443 端口无法连接，自动转 http）
+     */
+    fun sanitizeUrl(rawUrl: String): String {
+        var url = rawUrl.trim()
+        if (url.startsWith("https://live.ximalaya.com", ignoreCase = true)) {
+            url = "http://" + url.substring("https://".length)
+        }
+        return url
+    }
+
+    /**
+     * 解析广播源文本：
+     * 同时支持：
+     * 1. 两行制格式（第一行频道名称，第二行播放URL）
+     * 2. 单行逗号格式（频道名称,播放URL）
+     * 3. 分组标签（#genre# 或 #group#）
      */
     fun parseRadioText(text: String): List<RadioChannel> {
         val result = mutableListOf<RadioChannel>()
-        var currentCategory = "网络电台"
+        var currentCategory = "广播电台"
+        var pendingName: String? = null
         var index = 1
 
         BufferedReader(StringReader(text)).useLines { lines ->
@@ -87,18 +104,26 @@ object RadioRepository {
                 if (line.isEmpty() || line.startsWith("#EXT") || line.startsWith("//")) {
                     continue
                 }
-                if (line.contains(",#genre#") || line.contains(",#group#")) {
-                    currentCategory = line.split(",")[0].trim()
+
+                // 识别分类/分组
+                if (line.contains(",#genre#") || line.contains(",#group#") || (line.startsWith("[") && line.endsWith("]"))) {
+                    currentCategory = line.replace(",#genre#", "")
+                        .replace(",#group#", "")
+                        .removeSurrounding("[", "]")
+                        .trim()
+                    pendingName = null
                     continue
                 }
-                val parts = line.split(",", limit = 2)
-                if (parts.size == 2) {
+
+                // 格式 1：单行逗号制 "频道名称,URL"
+                if (line.contains(",") && (line.contains("http://", ignoreCase = true) || line.contains("https://", ignoreCase = true))) {
+                    val parts = line.split(",", limit = 2)
                     val name = parts[0].trim()
-                    val url = parts[1].trim()
+                    val url = sanitizeUrl(parts[1])
                     if (name.isNotEmpty() && url.startsWith("http", ignoreCase = true)) {
                         result.add(
                             RadioChannel(
-                                id = "online_$index",
+                                id = "ch_$index",
                                 name = name,
                                 category = currentCategory,
                                 frequency = "网络广播",
@@ -106,7 +131,29 @@ object RadioRepository {
                             )
                         )
                         index++
+                        pendingName = null
+                        continue
                     }
+                }
+
+                // 格式 2：两行制（当前行为 URL，上一行为名称）
+                if (line.startsWith("http://", ignoreCase = true) || line.startsWith("https://", ignoreCase = true)) {
+                    val url = sanitizeUrl(line)
+                    val name = pendingName ?: "电台 $index"
+                    result.add(
+                        RadioChannel(
+                            id = "ch_$index",
+                            name = name,
+                            category = currentCategory,
+                            frequency = "网络广播",
+                            streamUrl = url
+                        )
+                    )
+                    index++
+                    pendingName = null
+                } else {
+                    // 当前行是频道名称，暂存等待下一行读取 URL
+                    pendingName = line
                 }
             }
         }
