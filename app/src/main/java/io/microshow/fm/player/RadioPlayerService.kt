@@ -8,6 +8,9 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.MediaPlayer
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -32,7 +35,10 @@ import io.microshow.fm.ui.MainActivity
 
 class RadioPlayerService : Service() {
 
-    private lateinit var player: ExoPlayer
+    private lateinit var exoPlayer: ExoPlayer
+    private var nativePlayer: MediaPlayer? = null
+    private var isUsingNativePlayer = false
+
     private var mediaSession: MediaSession? = null
     private var currentChannel: RadioChannel? = null
     private val channelList = ArrayList<RadioChannel>()
@@ -109,19 +115,24 @@ class RadioPlayerService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        initPlayer()
+        initExoPlayer()
         createNotificationChannel()
     }
 
-    private fun initPlayer() {
-        // 1. HTTP 数据源配置
+    private fun isTvheadendOrTs(url: String): Boolean {
+        return url.contains(":8168", ignoreCase = true) ||
+               url.contains("/stream/", ignoreCase = true) ||
+               url.contains(".ts", ignoreCase = true) ||
+               url.contains("audio/mp2t", ignoreCase = true)
+    }
+
+    private fun initExoPlayer() {
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
             .setUserAgent("Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
             .setConnectTimeoutMs(15000)
             .setReadTimeoutMs(15000)
             .setAllowCrossProtocolRedirects(true)
 
-        // 2. 解封装器配置（支持 IPTV / MPEG-TS 流）
         val extractorsFactory = DefaultExtractorsFactory()
             .setTsExtractorFlags(
                 DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
@@ -131,16 +142,17 @@ class RadioPlayerService : Service() {
 
         val mediaSourceFactory = DefaultMediaSourceFactory(httpDataSourceFactory, extractorsFactory)
 
-        player = ExoPlayer.Builder(this)
+        exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
             .setHandleAudioBecomingNoisy(true)
             .build()
 
-        player.addListener(object : Player.Listener {
+        exoPlayer.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
+                if (isUsingNativePlayer) return
                 val status = when (state) {
                     Player.STATE_BUFFERING -> "正在缓冲..."
-                    Player.STATE_READY -> if (player.isPlaying) "正在播放" else "已暂停"
+                    Player.STATE_READY -> if (exoPlayer.isPlaying) "正在播放" else "已暂停"
                     Player.STATE_ENDED -> "播放结束"
                     else -> "就绪"
                 }
@@ -149,23 +161,40 @@ class RadioPlayerService : Service() {
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isUsingNativePlayer) return
                 val status = if (isPlaying) "正在播放" else "已暂停"
                 updateNotification(status)
                 broadcastStatus(status)
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                Log.e("RadioPlayerService", "播放错误: ${error.errorCodeName}", error)
+                Log.e("RadioPlayerService", "ExoPlayer 播放错误: ${error.errorCodeName}", error)
+                currentChannel?.let { ch ->
+                    val cleanUrl = RadioRepository.sanitizeUrl(ch.streamUrl)
+                    if (!isUsingNativePlayer) {
+                        Log.d("RadioPlayerService", "自动尝试原生底层播放器...")
+                        playWithNativePlayer(cleanUrl)
+                        return
+                    }
+                }
                 val status = "播放重试中..."
                 updateNotification(status)
                 broadcastStatus(status)
-                player.prepare()
-                player.play()
+                exoPlayer.prepare()
+                exoPlayer.play()
             }
         })
 
-        // 3. 封装 ForwardingPlayer 支持方向盘 / 车机中控调用 seekToNext / seekToPrevious 切台
-        val forwardingPlayer = object : ForwardingPlayer(player) {
+        val forwardingPlayer = object : ForwardingPlayer(exoPlayer) {
+            override fun play() {
+                resumePlayback()
+            }
+            override fun pause() {
+                pausePlayback()
+            }
+            override fun isPlaying(): Boolean {
+                return isCurrentlyPlaying()
+            }
             override fun seekToNext() {
                 playNext()
             }
@@ -180,6 +209,7 @@ class RadioPlayerService : Service() {
             }
             override fun getAvailableCommands(): Player.Commands {
                 return super.getAvailableCommands().buildUpon()
+                    .add(Player.COMMAND_PLAY_PAUSE)
                     .add(Player.COMMAND_SEEK_TO_NEXT)
                     .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
                     .add(Player.COMMAND_SEEK_TO_PREVIOUS)
@@ -187,7 +217,8 @@ class RadioPlayerService : Service() {
                     .build()
             }
             override fun isCommandAvailable(command: Int): Boolean {
-                if (command == Player.COMMAND_SEEK_TO_NEXT ||
+                if (command == Player.COMMAND_PLAY_PAUSE ||
+                    command == Player.COMMAND_SEEK_TO_NEXT ||
                     command == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM ||
                     command == Player.COMMAND_SEEK_TO_PREVIOUS ||
                     command == Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM) {
@@ -197,7 +228,6 @@ class RadioPlayerService : Service() {
             }
         }
 
-        // 4. 构建 MediaSession 并监听车载方向盘按键事件
         val sessionCallback = object : MediaSession.Callback {
             override fun onMediaButtonEvent(
                 session: MediaSession,
@@ -224,6 +254,11 @@ class RadioPlayerService : Service() {
                         KeyEvent.KEYCODE_DPAD_UP,
                         KeyEvent.KEYCODE_PAGE_UP -> {
                             playPrevious()
+                            return true
+                        }
+                        KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                        KeyEvent.KEYCODE_HEADSETHOOK -> {
+                            if (isCurrentlyPlaying()) pausePlayback() else resumePlayback()
                             return true
                         }
                     }
@@ -272,14 +307,14 @@ class RadioPlayerService : Service() {
                 playPrevious()
             }
             ACTION_TOGGLE_PAUSE -> {
-                if (player.isPlaying) {
-                    player.pause()
+                if (isCurrentlyPlaying()) {
+                    pausePlayback()
                 } else {
-                    player.play()
+                    resumePlayback()
                 }
             }
             ACTION_STOP -> {
-                player.stop()
+                stopAllPlayback()
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     stopForeground(STOP_FOREGROUND_REMOVE)
                 } else {
@@ -322,24 +357,122 @@ class RadioPlayerService : Service() {
         currentChannel = channel
         val cleanUrl = RadioRepository.sanitizeUrl(channel.streamUrl)
 
-        val mediaItemBuilder = MediaItem.Builder().setUri(cleanUrl)
-        if (cleanUrl.contains(".m3u8", ignoreCase = true)) {
-            mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-        } else if (cleanUrl.contains("/stream/", ignoreCase = true) || cleanUrl.contains(":8168", ignoreCase = true)) {
-            mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP2T)
-        }
-
-        player.setMediaItem(mediaItemBuilder.build())
-        player.prepare()
-        player.play()
-
         val notification = buildNotification("正在连接...")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+
+        if (isTvheadendOrTs(cleanUrl)) {
+            Log.d("RadioPlayerService", "检测到 Tvheadend/TS 流，使用专用原生底层引擎播放: $cleanUrl")
+            playWithNativePlayer(cleanUrl)
+        } else {
+            Log.d("RadioPlayerService", "使用 ExoPlayer 引擎播放: $cleanUrl")
+            playWithExoPlayer(cleanUrl)
+        }
+    }
+
+    private fun playWithNativePlayer(url: String) {
+        stopAllPlayback()
+        isUsingNativePlayer = true
+
+        try {
+            val player = MediaPlayer().apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .build()
+                )
+                setDataSource(applicationContext, Uri.parse(url))
+                setOnPreparedListener { mp ->
+                    mp.start()
+                    updateNotification("正在播放")
+                    broadcastStatus("正在播放")
+                }
+                setOnCompletionListener {
+                    updateNotification("播放结束")
+                    broadcastStatus("播放结束")
+                }
+                setOnErrorListener { _, what, extra ->
+                    Log.e("RadioPlayerService", "Native MediaPlayer 错误: what=$what, extra=$extra")
+                    isUsingNativePlayer = false
+                    playWithExoPlayer(url)
+                    true
+                }
+                prepareAsync()
+            }
+            nativePlayer = player
+            updateNotification("正在缓冲(TS)...")
+            broadcastStatus("正在缓冲...")
+        } catch (e: Exception) {
+            Log.e("RadioPlayerService", "Native MediaPlayer 启动异常", e)
+            playWithExoPlayer(url)
+        }
+    }
+
+    private fun playWithExoPlayer(url: String) {
+        stopAllPlayback()
+        isUsingNativePlayer = false
+
+        val mediaItemBuilder = MediaItem.Builder().setUri(url)
+        if (url.contains(".m3u8", ignoreCase = true)) {
+            mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+        } else if (isTvheadendOrTs(url)) {
+            mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP2T)
+        }
+
+        exoPlayer.setMediaItem(mediaItemBuilder.build())
+        exoPlayer.prepare()
+        exoPlayer.play()
+        updateNotification("正在连接...")
         broadcastStatus("正在连接...")
+    }
+
+    fun isCurrentlyPlaying(): Boolean {
+        return if (isUsingNativePlayer) {
+            nativePlayer?.isPlaying == true
+        } else {
+            exoPlayer.isPlaying
+        }
+    }
+
+    fun pausePlayback() {
+        if (isUsingNativePlayer) {
+            nativePlayer?.pause()
+        } else {
+            exoPlayer.pause()
+        }
+        updateNotification("已暂停")
+        broadcastStatus("已暂停")
+    }
+
+    fun resumePlayback() {
+        if (isUsingNativePlayer) {
+            nativePlayer?.start()
+        } else {
+            exoPlayer.play()
+        }
+        updateNotification("正在播放")
+        broadcastStatus("正在播放")
+    }
+
+    fun stopAllPlayback() {
+        try {
+            if (exoPlayer.isPlaying || exoPlayer.playbackState != Player.STATE_IDLE) {
+                exoPlayer.stop()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        try {
+            nativePlayer?.stop()
+            nativePlayer?.release()
+            nativePlayer = null
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun broadcastStatus(status: String) {
@@ -379,6 +512,7 @@ class RadioPlayerService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
         )
 
+        val isPlaying = isCurrentlyPlaying()
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(channelName)
             .setContentText("$freq · $statusText")
@@ -386,12 +520,12 @@ class RadioPlayerService : Service() {
             .setContentIntent(pOpenApp)
             .addAction(android.R.drawable.ic_media_previous, "上一台", pPrev)
             .addAction(
-                if (player.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
-                if (player.isPlaying) "暂停" else "播放",
+                if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
+                if (isPlaying) "暂停" else "播放",
                 pToggle
             )
             .addAction(android.R.drawable.ic_media_next, "下一台", pNext)
-            .setOngoing(player.isPlaying)
+            .setOngoing(isPlaying)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
@@ -416,8 +550,9 @@ class RadioPlayerService : Service() {
     }
 
     override fun onDestroy() {
+        stopAllPlayback()
         mediaSession?.run {
-            player.release()
+            exoPlayer.release()
             release()
             mediaSession = null
         }
