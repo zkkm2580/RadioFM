@@ -10,7 +10,7 @@ import io.microshow.fm.model.RadioChannel
 
 class ChannelAdapter(
     private var channels: List<RadioChannel>,
-    private val onItemClick: (RadioChannel) -> Unit
+    private val onItemClick: (RadioChannel, Int) -> Unit
 ) : RecyclerView.Adapter<ChannelAdapter.ChannelViewHolder>() {
 
     private var selectedIndex = -1
@@ -18,6 +18,15 @@ class ChannelAdapter(
     fun updateChannels(newChannels: List<RadioChannel>) {
         this.channels = newChannels
         notifyDataSetChanged()
+    }
+
+    fun setSelectedIndex(index: Int) {
+        if (index != selectedIndex) {
+            val prev = selectedIndex
+            selectedIndex = index
+            if (prev in channels.indices) notifyItemChanged(prev)
+            if (selectedIndex in channels.indices) notifyItemChanged(selectedIndex)
+        }
     }
 
     inner class ChannelViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
@@ -47,7 +56,7 @@ class ChannelAdapter(
             selectedIndex = holder.adapterPosition
             notifyItemChanged(prev)
             notifyItemChanged(selectedIndex)
-            onItemClick(channel)
+            onItemClick(channel, selectedIndex)
         }
     }
 

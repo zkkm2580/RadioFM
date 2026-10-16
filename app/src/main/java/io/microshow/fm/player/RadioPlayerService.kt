@@ -11,7 +11,9 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
@@ -22,6 +24,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import androidx.media3.extractor.ts.TsExtractor
+import androidx.media3.session.MediaSession
 import io.microshow.fm.R
 import io.microshow.fm.data.RadioRepository
 import io.microshow.fm.model.RadioChannel
@@ -30,28 +33,55 @@ import io.microshow.fm.ui.MainActivity
 class RadioPlayerService : Service() {
 
     private lateinit var player: ExoPlayer
+    private var mediaSession: MediaSession? = null
     private var currentChannel: RadioChannel? = null
+    private val channelList = ArrayList<RadioChannel>()
+    private var currentIndex = -1
 
     companion object {
         const val ACTION_PLAY = "io.microshow.fm.ACTION_PLAY"
         const val ACTION_TOGGLE_PAUSE = "io.microshow.fm.ACTION_TOGGLE_PAUSE"
         const val ACTION_STOP = "io.microshow.fm.ACTION_STOP"
+        const val ACTION_NEXT = "io.microshow.fm.ACTION_NEXT"
+        const val ACTION_PREV = "io.microshow.fm.ACTION_PREV"
+        const val ACTION_UPDATE_PLAYLIST = "io.microshow.fm.ACTION_UPDATE_PLAYLIST"
         const val ACTION_STATUS_CHANGE = "io.microshow.fm.ACTION_STATUS_CHANGE"
+
         const val EXTRA_CHANNEL = "extra_channel"
+        const val EXTRA_CHANNEL_LIST = "extra_channel_list"
         const val EXTRA_STATUS = "extra_status"
+        const val EXTRA_CURRENT_INDEX = "extra_current_index"
+
         private const val CHANNEL_ID = "radio_playback_channel"
         private const val NOTIFICATION_ID = 1001
 
-        fun play(context: Context, channel: RadioChannel) {
+        fun play(context: Context, channel: RadioChannel, list: List<RadioChannel>? = null) {
             val intent = Intent(context, RadioPlayerService::class.java).apply {
                 action = ACTION_PLAY
                 putExtra(EXTRA_CHANNEL, channel)
+                if (list != null) {
+                    putExtra(EXTRA_CHANNEL_LIST, ArrayList(list))
+                }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)
             }
+        }
+
+        fun next(context: Context) {
+            val intent = Intent(context, RadioPlayerService::class.java).apply {
+                action = ACTION_NEXT
+            }
+            context.startService(intent)
+        }
+
+        fun prev(context: Context) {
+            val intent = Intent(context, RadioPlayerService::class.java).apply {
+                action = ACTION_PREV
+            }
+            context.startService(intent)
         }
 
         fun togglePause(context: Context) {
@@ -67,6 +97,14 @@ class RadioPlayerService : Service() {
             }
             context.startService(intent)
         }
+
+        fun updatePlaylist(context: Context, list: List<RadioChannel>) {
+            val intent = Intent(context, RadioPlayerService::class.java).apply {
+                action = ACTION_UPDATE_PLAYLIST
+                putExtra(EXTRA_CHANNEL_LIST, ArrayList(list))
+            }
+            context.startService(intent)
+        }
     }
 
     override fun onCreate() {
@@ -76,14 +114,14 @@ class RadioPlayerService : Service() {
     }
 
     private fun initPlayer() {
-        // 1. 配置 HTTP 数据源：设置常见 User-Agent、超时时间以及允许重定向
+        // 1. HTTP 数据源配置
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
             .setUserAgent("Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
             .setConnectTimeoutMs(15000)
             .setReadTimeoutMs(15000)
             .setAllowCrossProtocolRedirects(true)
 
-        // 2. 配置解封装器：增强对 MPEG-TS / IPTV 直播音频流的兼容性
+        // 2. 解封装器配置（支持 IPTV / MPEG-TS 流）
         val extractorsFactory = DefaultExtractorsFactory()
             .setTsExtractorFlags(
                 DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
@@ -118,20 +156,120 @@ class RadioPlayerService : Service() {
 
             override fun onPlayerError(error: PlaybackException) {
                 Log.e("RadioPlayerService", "播放错误: ${error.errorCodeName}", error)
-                val status = "播放失败，尝试重连..."
+                val status = "播放重试中..."
                 updateNotification(status)
                 broadcastStatus(status)
                 player.prepare()
                 player.play()
             }
         })
+
+        // 3. 封装 ForwardingPlayer 支持方向盘 / 车机中控调用 seekToNext / seekToPrevious 切台
+        val forwardingPlayer = object : ForwardingPlayer(player) {
+            override fun seekToNext() {
+                playNext()
+            }
+            override fun seekToNextMediaItem() {
+                playNext()
+            }
+            override fun seekToPrevious() {
+                playPrevious()
+            }
+            override fun seekToPreviousMediaItem() {
+                playPrevious()
+            }
+            override fun getAvailableCommands(): Player.Commands {
+                return super.getAvailableCommands().buildUpon()
+                    .add(Player.COMMAND_SEEK_TO_NEXT)
+                    .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                    .build()
+            }
+            override fun isCommandAvailable(command: Int): Boolean {
+                if (command == Player.COMMAND_SEEK_TO_NEXT ||
+                    command == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM ||
+                    command == Player.COMMAND_SEEK_TO_PREVIOUS ||
+                    command == Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM) {
+                    return true
+                }
+                return super.isCommandAvailable(command)
+            }
+        }
+
+        // 4. 构建 MediaSession 并监听车载方向盘按键事件
+        val sessionCallback = object : MediaSession.Callback {
+            override fun onMediaButtonEvent(
+                session: MediaSession,
+                controllerInfo: MediaSession.ControllerInfo,
+                intent: Intent
+            ): Boolean {
+                val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+                }
+                if (keyEvent?.action == KeyEvent.ACTION_DOWN) {
+                    when (keyEvent.keyCode) {
+                        KeyEvent.KEYCODE_MEDIA_NEXT,
+                        KeyEvent.KEYCODE_CHANNEL_UP,
+                        KeyEvent.KEYCODE_DPAD_DOWN,
+                        KeyEvent.KEYCODE_PAGE_DOWN -> {
+                            playNext()
+                            return true
+                        }
+                        KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                        KeyEvent.KEYCODE_CHANNEL_DOWN,
+                        KeyEvent.KEYCODE_DPAD_UP,
+                        KeyEvent.KEYCODE_PAGE_UP -> {
+                            playPrevious()
+                            return true
+                        }
+                    }
+                }
+                return super.onMediaButtonEvent(session, controllerInfo, intent)
+            }
+        }
+
+        mediaSession = MediaSession.Builder(this, forwardingPlayer)
+            .setCallback(sessionCallback)
+            .build()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.hasExtra(EXTRA_CHANNEL_LIST) == true) {
+            val list = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getSerializableExtra(EXTRA_CHANNEL_LIST, ArrayList::class.java) as? ArrayList<RadioChannel>
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getSerializableExtra(EXTRA_CHANNEL_LIST) as? ArrayList<RadioChannel>
+            }
+            if (!list.isNullOrEmpty()) {
+                channelList.clear()
+                channelList.addAll(list)
+            }
+        }
+
         when (intent?.action) {
             ACTION_PLAY -> {
-                val channel = intent.getSerializableExtra(EXTRA_CHANNEL) as? RadioChannel
-                channel?.let { playChannel(it) }
+                val channel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getSerializableExtra(EXTRA_CHANNEL, RadioChannel::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getSerializableExtra(EXTRA_CHANNEL) as? RadioChannel
+                }
+                channel?.let {
+                    val idx = channelList.indexOfFirst { c -> c.streamUrl == it.streamUrl || c.name == it.name }
+                    if (idx >= 0) currentIndex = idx
+                    playChannel(it)
+                }
+            }
+            ACTION_NEXT -> {
+                playNext()
+            }
+            ACTION_PREV -> {
+                playPrevious()
             }
             ACTION_TOGGLE_PAUSE -> {
                 if (player.isPlaying) {
@@ -153,6 +291,31 @@ class RadioPlayerService : Service() {
             }
         }
         return START_STICKY
+    }
+
+    fun playNext() {
+        if (channelList.isEmpty()) {
+            channelList.addAll(RadioRepository.getPresetChannels())
+        }
+        if (channelList.isEmpty()) return
+        val nextIdx = (currentIndex + 1) % channelList.size
+        playChannelAtIndex(nextIdx)
+    }
+
+    fun playPrevious() {
+        if (channelList.isEmpty()) {
+            channelList.addAll(RadioRepository.getPresetChannels())
+        }
+        if (channelList.isEmpty()) return
+        val prevIdx = if (currentIndex <= 0) channelList.size - 1 else currentIndex - 1
+        playChannelAtIndex(prevIdx)
+    }
+
+    private fun playChannelAtIndex(index: Int) {
+        if (index in channelList.indices) {
+            currentIndex = index
+            playChannel(channelList[index])
+        }
     }
 
     private fun playChannel(channel: RadioChannel) {
@@ -182,6 +345,8 @@ class RadioPlayerService : Service() {
     private fun broadcastStatus(status: String) {
         val intent = Intent(ACTION_STATUS_CHANGE).apply {
             putExtra(EXTRA_STATUS, status)
+            putExtra(EXTRA_CURRENT_INDEX, currentIndex)
+            putExtra(EXTRA_CHANNEL, currentChannel)
             setPackage(packageName)
         }
         sendBroadcast(intent)
@@ -199,11 +364,18 @@ class RadioPlayerService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
         )
 
-        val toggleIntent = Intent(this, RadioPlayerService::class.java).apply {
-            action = ACTION_TOGGLE_PAUSE
-        }
+        val pPrev = PendingIntent.getService(
+            this, 2, Intent(this, RadioPlayerService::class.java).apply { action = ACTION_PREV },
+            PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+        )
+
         val pToggle = PendingIntent.getService(
-            this, 1, toggleIntent,
+            this, 1, Intent(this, RadioPlayerService::class.java).apply { action = ACTION_TOGGLE_PAUSE },
+            PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+        )
+
+        val pNext = PendingIntent.getService(
+            this, 3, Intent(this, RadioPlayerService::class.java).apply { action = ACTION_NEXT },
             PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
         )
 
@@ -212,11 +384,13 @@ class RadioPlayerService : Service() {
             .setContentText("$freq · $statusText")
             .setSmallIcon(R.drawable.ic_radio)
             .setContentIntent(pOpenApp)
+            .addAction(android.R.drawable.ic_media_previous, "上一台", pPrev)
             .addAction(
                 if (player.isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
                 if (player.isPlaying) "暂停" else "播放",
                 pToggle
             )
+            .addAction(android.R.drawable.ic_media_next, "下一台", pNext)
             .setOngoing(player.isPlaying)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
@@ -242,7 +416,11 @@ class RadioPlayerService : Service() {
     }
 
     override fun onDestroy() {
-        player.release()
+        mediaSession?.run {
+            player.release()
+            release()
+            mediaSession = null
+        }
         super.onDestroy()
     }
 

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -25,12 +26,27 @@ class MainActivity : AppCompatActivity() {
     private lateinit var channelAdapter: ChannelAdapter
 
     private var activeChannel: RadioChannel? = null
+    private var currentChannels: List<RadioChannel> = emptyList()
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val status = intent?.getStringExtra(RadioPlayerService.EXTRA_STATUS) ?: return
-            val channelName = activeChannel?.name ?: "畅听电台"
-            tvCurrentChannel.text = "$channelName · $status"
+            val index = intent.getIntExtra(RadioPlayerService.EXTRA_CURRENT_INDEX, -1)
+            val channel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getSerializableExtra(RadioPlayerService.EXTRA_CHANNEL, RadioChannel::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getSerializableExtra(RadioPlayerService.EXTRA_CHANNEL) as? RadioChannel
+            }
+
+            if (channel != null) {
+                activeChannel = channel
+                tvCurrentChannel.text = "${channel.name} · $status"
+            }
+            if (index >= 0) {
+                channelAdapter.setSelectedIndex(index)
+                rvChannels.smoothScrollToPosition(index)
+            }
         }
     }
 
@@ -44,19 +60,21 @@ class MainActivity : AppCompatActivity() {
         rvChannels = findViewById(R.id.rv_channels)
 
         // 1. 初始化预设电台
-        val presetChannels = RadioRepository.getPresetChannels()
-        channelAdapter = ChannelAdapter(presetChannels) { channel ->
+        currentChannels = RadioRepository.getPresetChannels()
+        channelAdapter = ChannelAdapter(currentChannels) { channel, index ->
             activeChannel = channel
             tvCurrentChannel.text = "${channel.name} · 正在连接..."
-            RadioPlayerService.play(this, channel)
+            RadioPlayerService.play(this, channel, currentChannels)
         }
         rvChannels.layoutManager = LinearLayoutManager(this)
         rvChannels.adapter = channelAdapter
 
-        // 2. 异步拉取 http://zj.537224.xyz/radio.txt 最新在线电台源，自动同步更新列表
+        // 2. 异步拉取最新在线电台源并同步至播放服务
         RadioRepository.fetchOnlineChannels { onlineChannels ->
             runOnUiThread {
+                currentChannels = onlineChannels
                 channelAdapter.updateChannels(onlineChannels)
+                RadioPlayerService.updatePlaylist(this, onlineChannels)
             }
         }
 
@@ -75,6 +93,36 @@ class MainActivity : AppCompatActivity() {
         } else {
             registerReceiver(statusReceiver, filter)
         }
+    }
+
+    /**
+     * 拦截车载方向盘物理按键、车载旋钮与蓝牙媒体切台按键
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_MEDIA_NEXT,
+                KeyEvent.KEYCODE_CHANNEL_UP,
+                KeyEvent.KEYCODE_PAGE_DOWN,
+                KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    RadioPlayerService.next(this)
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                KeyEvent.KEYCODE_CHANNEL_DOWN,
+                KeyEvent.KEYCODE_PAGE_UP,
+                KeyEvent.KEYCODE_DPAD_UP -> {
+                    RadioPlayerService.prev(this)
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                KeyEvent.KEYCODE_HEADSETHOOK -> {
+                    RadioPlayerService.togglePause(this)
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onDestroy() {
