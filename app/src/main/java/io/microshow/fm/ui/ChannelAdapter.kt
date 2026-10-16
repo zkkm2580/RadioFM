@@ -9,11 +9,16 @@ import io.microshow.fm.R
 import io.microshow.fm.model.RadioChannel
 
 class ChannelAdapter(
-    private val channels: List<RadioChannel>,
+    private var channels: List<RadioChannel>,
     private val onItemClick: (RadioChannel) -> Unit
 ) : RecyclerView.Adapter<ChannelAdapter.ChannelViewHolder>() {
 
     private var selectedIndex = -1
+
+    fun updateChannels(newChannels: List<RadioChannel>) {
+        this.channels = newChannels
+        notifyDataSetChanged()
+    }
 
     inner class ChannelViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         val tvName: TextView = itemView.findViewById(R.id.tv_channel_name)

@@ -17,6 +17,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnToggle: Button
     private lateinit var btnStop: Button
     private lateinit var rvChannels: RecyclerView
+    private lateinit var channelAdapter: ChannelAdapter
 
     private var activeChannel: RadioChannel? = null
 
@@ -29,12 +30,21 @@ class MainActivity : AppCompatActivity() {
         btnStop = findViewById(R.id.btn_stop)
         rvChannels = findViewById(R.id.rv_channels)
 
-        val channels = RadioRepository.getPresetChannels()
-        rvChannels.layoutManager = LinearLayoutManager(this)
-        rvChannels.adapter = ChannelAdapter(channels) { channel ->
+        // 1. 初始化预设电台（与 http://zj.537224.xyz/radio.txt 保持一致）
+        val presetChannels = RadioRepository.getPresetChannels()
+        channelAdapter = ChannelAdapter(presetChannels) { channel ->
             activeChannel = channel
             tvCurrentChannel.text = "${channel.name} (${channel.frequency})"
             RadioPlayerService.play(this, channel)
+        }
+        rvChannels.layoutManager = LinearLayoutManager(this)
+        rvChannels.adapter = channelAdapter
+
+        // 2. 异步拉取 http://zj.537224.xyz/radio.txt 最新在线电台源，自动同步更新列表
+        RadioRepository.fetchOnlineChannels { onlineChannels ->
+            runOnUiThread {
+                channelAdapter.updateChannels(onlineChannels)
+            }
         }
 
         btnToggle.setOnClickListener {
