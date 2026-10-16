@@ -28,14 +28,7 @@ jobs:
         gradle-version: '8.5'
 
     - name: 编译 Debug APK
-      run: |
-        if ! gradle assembleDebug --stacktrace --no-daemon > gradle_build.log 2>&1; then
-          echo "### 编译失败详情" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          tail -n 80 gradle_build.log >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          exit 1
-        fi
+      run: gradle assembleDebug --stacktrace
 
     - name: 整理发布 APK 文件
       id: release_apk
@@ -66,10 +59,10 @@ jobs:
             - 自动请求与维护音频焦点（AudioFocus），方向盘上一曲/下一曲按键 100% 响应；
             - 通知栏升级为标准车载媒体控制样式（支持上一台/暂停/下一台）。
           
-          - 📻 **集成 VLC 官方内核 (LibVLC)**：
-            - 内置全套 FFmpeg 软解核心，完美播放 Tvheadend MPEG-TS（`audio/mp2t`）直播流；
-            - 完美支持喜马拉雅 HLS m3u8 及各类私有端口网络广播流；
-            - 智能 URL 容错与秒开缓冲机制。
+          - 📻 **Tvheadend MPEG-TS 广播流播放增强**：
+            - 针对 Tvheadend 特征直播流（8168 端口、/stream/、audio/mp2t）定制 VLC 原生 User-Agent 请求头与 Stagefright/ExoPlayer TS 解封装通道；
+            - 自动双引擎故障转移与重连机制，保障 Tvheadend MP2 纯音频流正常播放；
+            - 完美支持喜马拉雅 HLS m3u8 及各类私有端口网络广播流。
           
           - 🌙 **深色/夜间模式自动跟随系统**：
             - 新增 DayNight 双套色彩与主题系统，汽车开大灯/夜间时界面自动切换为深色护眼模式。

@@ -43,10 +43,7 @@ dependencies {
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
 
-    // VLC 官方 Android 播放内核 (LibVLC，内置全套 FFmpeg 软解，支持 MPEG-TS、MP2、HLS 等全部格式)
-    implementation("org.videolan.android:libvlc-all:3.6.2")
-
-    // 经典车载 MediaSession 与 MediaButton 兼容支持
+    // 经典车载 Media 兼容支持
     implementation("androidx.media:media:1.7.0")
 
     // Media3 / ExoPlayer 核心组件
