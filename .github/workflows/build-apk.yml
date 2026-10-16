@@ -28,7 +28,8 @@ jobs:
         gradle-version: '8.5'
 
     - name: 编译 Debug APK
-      run: gradle assembleDebug --stacktrace
+      run: |
+        gradle assembleDebug --stacktrace --no-daemon
 
     - name: 整理发布 APK 文件
       id: release_apk

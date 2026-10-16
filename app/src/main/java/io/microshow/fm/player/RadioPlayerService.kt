@@ -26,14 +26,11 @@ import io.microshow.fm.R
 import io.microshow.fm.data.RadioRepository
 import io.microshow.fm.model.RadioChannel
 import io.microshow.fm.ui.MainActivity
-import org.videolan.libvlc.LibVLC
-import org.videolan.libvlc.Media
-import org.videolan.libvlc.MediaPlayer
+import org.videolan.libvlc.media.MediaPlayer as VlcMediaPlayer
 
 class RadioPlayerService : Service() {
 
-    private var libVLC: LibVLC? = null
-    private var vlcPlayer: MediaPlayer? = null
+    private var vlcPlayer: VlcMediaPlayer? = null
     private lateinit var mediaSession: MediaSessionCompat
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
@@ -112,7 +109,7 @@ class RadioPlayerService : Service() {
     }
 
     /**
-     * 监听各种车机（掌讯、方易通、鼎微等）私有或系统媒体按键广播
+     * 监听车载中控、蓝牙或方向盘切歌广播
      */
     private val carMediaCommandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -272,47 +269,35 @@ class RadioPlayerService : Service() {
     }
 
     private fun initVlcPlayer() {
-        val options = arrayListOf(
-            "--aout=opensles",
-            "--audio-time-stretch",
-            "--network-caching=2000",
-            "--http-reconnect",
-            "-vvv"
-        )
-        libVLC = LibVLC(this, options)
-        vlcPlayer = MediaPlayer(libVLC)
-
-        vlcPlayer?.setEventListener { event ->
-            when (event.type) {
-                MediaPlayer.Event.Buffering -> {
-                    val percent = event.buffering.toInt()
+        try {
+            vlcPlayer = VlcMediaPlayer().apply {
+                setOnPreparedListener { mp ->
+                    mp.start()
+                    updateNotification("正在播放")
+                    broadcastStatus("正在播放")
+                    updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
+                }
+                setOnBufferingUpdateListener { _, percent ->
                     val text = "正在缓冲 $percent%..."
                     updateNotification(text)
                     broadcastStatus(text)
                     updatePlaybackState(PlaybackStateCompat.STATE_BUFFERING)
                 }
-                MediaPlayer.Event.Playing -> {
-                    updateNotification("正在播放")
-                    broadcastStatus("正在播放")
-                    updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
-                }
-                MediaPlayer.Event.Paused -> {
-                    updateNotification("已暂停")
-                    broadcastStatus("已暂停")
-                    updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
-                }
-                MediaPlayer.Event.Stopped, MediaPlayer.Event.EndReached -> {
+                setOnCompletionListener {
                     updateNotification("播放结束")
                     broadcastStatus("播放结束")
                     updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
                 }
-                MediaPlayer.Event.EncounteredError -> {
-                    Log.e("RadioPlayerService", "VLC 播放发生错误，尝试重连")
-                    updateNotification("连接重试中...")
-                    broadcastStatus("连接重试中...")
+                setOnErrorListener { _, what, extra ->
+                    Log.e("RadioPlayerService", "VLC 播放错误: what=$what, extra=$extra")
+                    updateNotification("连接失败，重试中...")
+                    broadcastStatus("连接失败，重试中...")
                     updatePlaybackState(PlaybackStateCompat.STATE_ERROR)
+                    true
                 }
             }
+        } catch (e: Exception) {
+            Log.e("RadioPlayerService", "初始化 VLC 失败", e)
         }
     }
 
@@ -407,16 +392,12 @@ class RadioPlayerService : Service() {
         updatePlaybackState(PlaybackStateCompat.STATE_BUFFERING)
 
         try {
-            vlcPlayer?.stop()
-            val media = Media(libVLC, Uri.parse(cleanUrl)).apply {
-                setHWDecoderEnabled(false, false) // 强制软解，发挥 VLC 内置 FFmpeg 解码所有音频格式的优势
-                addOption(":network-caching=2000")
-                addOption(":clock-jitter=0")
-                addOption(":clock-synchro=0")
+            if (vlcPlayer == null) {
+                initVlcPlayer()
             }
-            vlcPlayer?.media = media
-            media.release()
-            vlcPlayer?.play()
+            vlcPlayer?.reset()
+            vlcPlayer?.setDataSource(applicationContext, Uri.parse(cleanUrl))
+            vlcPlayer?.prepareAsync()
         } catch (e: Exception) {
             Log.e("RadioPlayerService", "播放启动异常", e)
             broadcastStatus("连接失败")
@@ -430,7 +411,11 @@ class RadioPlayerService : Service() {
     }
 
     fun pausePlayback() {
-        vlcPlayer?.pause()
+        try {
+            vlcPlayer?.pause()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         updateNotification("已暂停")
         broadcastStatus("已暂停")
         updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
@@ -438,7 +423,11 @@ class RadioPlayerService : Service() {
 
     fun resumePlayback() {
         requestAudioFocus()
-        vlcPlayer?.play()
+        try {
+            vlcPlayer?.start()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         updateNotification("正在播放")
         broadcastStatus("正在播放")
         updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
@@ -544,8 +533,12 @@ class RadioPlayerService : Service() {
     override fun onDestroy() {
         unregisterReceiver(carMediaCommandReceiver)
         stopAllPlayback()
-        vlcPlayer?.release()
-        libVLC?.release()
+        try {
+            vlcPlayer?.release()
+            vlcPlayer = null
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         mediaSession.release()
         super.onDestroy()
     }
