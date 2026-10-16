@@ -10,6 +10,7 @@ import android.view.KeyEvent
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AppCompatDelegate
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import io.microshow.fm.R
@@ -51,6 +52,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // 设置夜间模式自动跟随系统
+        AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
@@ -104,18 +107,22 @@ class MainActivity : AppCompatActivity() {
                 KeyEvent.KEYCODE_MEDIA_NEXT,
                 KeyEvent.KEYCODE_CHANNEL_UP,
                 KeyEvent.KEYCODE_PAGE_DOWN,
-                KeyEvent.KEYCODE_DPAD_DOWN -> {
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
                     RadioPlayerService.next(this)
                     return true
                 }
                 KeyEvent.KEYCODE_MEDIA_PREVIOUS,
                 KeyEvent.KEYCODE_CHANNEL_DOWN,
                 KeyEvent.KEYCODE_PAGE_UP,
-                KeyEvent.KEYCODE_DPAD_UP -> {
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_MEDIA_REWIND -> {
                     RadioPlayerService.prev(this)
                     return true
                 }
                 KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                KeyEvent.KEYCODE_MEDIA_PLAY,
+                KeyEvent.KEYCODE_MEDIA_PAUSE,
                 KeyEvent.KEYCODE_HEADSETHOOK -> {
                     RadioPlayerService.togglePause(this)
                     return true

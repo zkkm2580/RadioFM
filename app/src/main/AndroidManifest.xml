@@ -30,6 +30,15 @@
             android:foregroundServiceType="mediaPlayback"
             android:exported="false" />
 
+        <!-- 车载方向盘按键与蓝牙媒体按键静态接收器 -->
+        <receiver
+            android:name="androidx.media.session.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>

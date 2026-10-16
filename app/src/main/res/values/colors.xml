@@ -3,4 +3,18 @@
     <color name="primary">#1E88E5</color>
     <color name="primary_dark">#1565C0</color>
     <color name="accent">#FF4081</color>
+
+    <!-- 日间色彩系统 -->
+    <color name="page_background">#F5F6F8</color>
+    <color name="header_background">#1E88E5</color>
+    <color name="header_title_text">#FFFFFF</color>
+    <color name="header_subtitle_text">#E3F2FD</color>
+    <color name="button_toggle_bg">#FFFFFF</color>
+    <color name="button_toggle_text">#1E88E5</color>
+    <color name="section_title_text">#757575</color>
+    <color name="item_name_text">#212121</color>
+    <color name="item_sub_text">#757575</color>
+    <color name="item_category_bg">#E0E0E0</color>
+    <color name="item_category_text">#424242</color>
+    <color name="item_selected_bg">#261E88E5</color>
 </resources>

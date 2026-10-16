@@ -4,6 +4,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
+import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.RecyclerView
 import io.microshow.fm.R
 import io.microshow.fm.model.RadioChannel
@@ -47,9 +48,13 @@ class ChannelAdapter(
         holder.tvCategory.text = channel.category
 
         val isSelected = position == selectedIndex
-        holder.itemView.setBackgroundColor(
-            if (isSelected) 0x1A1E88E5 else 0x00000000
-        )
+        if (isSelected) {
+            holder.itemView.setBackgroundColor(
+                ContextCompat.getColor(holder.itemView.context, R.color.item_selected_bg)
+            )
+        } else {
+            holder.itemView.setBackgroundColor(0x00000000)
+        }
 
         holder.itemView.setOnClickListener {
             val prev = selectedIndex
