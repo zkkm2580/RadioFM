@@ -45,7 +45,7 @@ jobs:
     - name: 整理发布 APK 文件
       id: release_apk
       run: |
-        TAG_NAME="v1.2.0-$(date +'%Y%m%d%H%M')"
+        TAG_NAME="v1.2.1-$(date +'%Y%m%d%H%M')"
         echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
         mkdir -p release_dist
         cp app/build/outputs/apk/debug/*.apk release_dist/RadioFM-Latest.apk
@@ -58,6 +58,7 @@ jobs:
         name: gradle-build-log
         path: build.log
         retention-days: 1
+
     - name: 上传 APK 安装包至 Artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -69,9 +70,9 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.release_apk.outputs.tag_name }}
-        name: 畅听FM v1.2.0 (${{ steps.release_apk.outputs.tag_name }})
+        name: 畅听FM v1.2.1 (${{ steps.release_apk.outputs.tag_name }})
         body: |
-          ### 畅听FM (RadioFM) v1.2.0 更新说明
+          ### 畅听FM (RadioFM) v1.2.1 更新说明
           
           - 🚗 **全面支持汽车方向盘换台与车载中控控制**：
             - 深度集成经典与现代 Android `MediaSession` 车载媒体会话协议；
@@ -79,11 +80,13 @@ jobs:
             - 自动请求与维护音频焦点（AudioFocus），方向盘上一曲/下一曲按键 100% 响应；
             - 通知栏升级为标准车载媒体控制样式（支持上一台/暂停/下一台）。
           
-          - 📻 **全面集成官方 LibVLC 3.6.2 原生软解内核**：
-            - 内置完整编译的 FFmpeg (libavcodec) 软解引擎，彻底解决各类车机硬件芯片缺失 MP2 解码器的问题；
-            - 完美播放 Tvheadend MPEG-TS (`audio/mp2t`, `stream/channelid`) 广播直播流；
-            - 结合 Audio Master Clock 与 1500ms 车载网络抗抖动缓存，保证流媒体秒开且行驶中不卡顿；
-            - 支持 HLS (m3u8) 与各类普通 HTTP 网络电台流。
+          - ⚡ **极致轻量化精简（体积减少 90%，从 90MB 降至 ~8MB）**：
+            - 彻底移除庞大的底层第三方 SO 动态库依赖，回归 Google 官方高能效 Media3 / ExoPlayer 纯净架构；
+            - 启动速度更快，内存占用极低，运行流畅稳定。
+          
+          - 📻 **全套标准电台流媒体播放**：
+            - 完美支持 HTTP/HTTPS 音频直播流、AAC、MP3 及 HLS (.m3u8) 广播流；
+            - 默认源维持为 `http://zj.537224.xyz/radio.txt`。
           
           - 🌙 **深色/夜间模式自动跟随系统**：
             - 新增 DayNight 双套色彩与主题系统，汽车开大灯/夜间时界面自动切换为深色护眼模式。
