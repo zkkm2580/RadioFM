@@ -1,4 +1,4 @@
-# 畅听FM (RadioFM) - 开源车载网络电台广播 App
+# 牛排火锅 FM 网络收音机(RadioFM) - 开源车载网络电台广播 App
 
 基于现代化 Android 技术栈构建的高性能、低延迟车载网络收音机与电台广播流媒体播放器，专为汽车中控大屏与车机系统深度定制。
 
@@ -16,7 +16,7 @@
 
 - 📻 **全套标准电台流媒体播放**：
   - 原生支持 HTTP / HTTPS 音频直播流、AAC、MP3 及 HLS (`.m3u8`) 广播流；
-  - 默认电台播放列表源：`http://zj.537224.xyz/radio.txt`，支持云端动态更新与智能本地持久化缓存。
+  - 默认电台播放列表源：支持云端动态更新与智能本地持久化缓存。
 
 - 🌙 **深色 / 夜间模式自动跟随系统**：
   - 内置 DayNight 双套主题与色彩规范；
@@ -47,4 +47,3 @@
   - `androidx.media3:media3-session` (车载媒体协议)
   - `androidx.appcompat` (DayNight 夜间模式支持)
   - `androidx.recyclerview` (电台列表高效渲染)
-- **应用包名 (applicationId)**：`io.nbhg.fm`
