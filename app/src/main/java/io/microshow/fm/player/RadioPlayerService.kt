@@ -33,6 +33,7 @@ class RadioPlayerService : Service() {
 
     private var libVLC: LibVLC? = null
     private var vlcPlayer: MediaPlayer? = null
+    private var currentMedia: Media? = null
 
     private lateinit var mediaSession: MediaSessionCompat
     private lateinit var audioManager: AudioManager
@@ -214,9 +215,8 @@ class RadioPlayerService : Service() {
 
     private fun initLibVLC() {
         if (libVLC == null) {
+            // \u91c7\u7528\u4e0e\u5b98\u65b9 VLC \u5ba2\u6237\u7aef\u5b8c\u5168\u4e00\u81f4\u7684\u7eaf\u51c0\u81ea\u9002\u5e94\u53c2\u6570\uff0c\u4e0d\u5199\u6b7b aout \u6216 no-video\uff0c\u786e\u4fdd\u517c\u5bb9\u5404\u7c7b\u8f66\u673a\u58f0\u5361\u4e0e TS \u65f6\u949f
             val options = ArrayList<String>().apply {
-                add("--no-video")               // \u7eaf\u97f3\u9891\u6a21\u5f0f\uff0c\u4e0d\u542f\u52a8\u89c6\u9891\u7ba1\u7ebf\uff0c\u7701\u7535\u7701\u5185\u5b58
-                add("--aout=android_audiotrack") // \u76f4\u63a5\u4f7f\u7528 AudioTrack \u58f0\u5361\u8f93\u51fa
                 add("--network-caching=1500")   // 1.5 \u79d2\u7f51\u7edc\u7f13\u5b58\uff0c\u79d2\u5f00\u6297\u6296\u52a8
                 add("--http-reconnect")          // \u7f51\u7edc\u95ea\u65ad\u81ea\u52a8\u91cd\u8fde
                 add("--no-spu")                  // \u5173\u95ed\u5b57\u5e55
@@ -244,6 +244,21 @@ class RadioPlayerService : Service() {
                                 updateNotification("\u6b63\u5728\u64ad\u653e")
                                 broadcastStatus("\u6b63\u5728\u64ad\u653e")
                                 updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
+                                // \u515c\u5e95\u786e\u4fdd\u97f3\u91cf\u4e3a 100% \u5e76\u4e14\u6fc0\u6d3b\u53ef\u7528\u97f3\u8f68
+                                try {
+                                    vlcPlayer?.volume = 100
+                                    val currentTrack = vlcPlayer?.audioTrack ?: -1
+                                    if (currentTrack == -1) {
+                                        val tracks = vlcPlayer?.audioTracks
+                                        val firstValid = tracks?.firstOrNull { it.id > 0 }
+                                        firstValid?.let {
+                                            Log.d(TAG, "\u81ea\u52a8\u6fc0\u6d3b\u97f3\u8f68: ${it.id} (${it.name})")
+                                            vlcPlayer?.setAudioTrack(it.id)
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "\u68c0\u67e5\u97f3\u8f68\u914d\u7f6e\u5f02\u5e38", e)
+                                }
                             }
                             MediaPlayer.Event.Paused -> {
                                 updateNotification("\u5df2\u6682\u505c")
@@ -444,14 +459,19 @@ class RadioPlayerService : Service() {
 
             player.stop()
 
+            // \u4f18\u96c5\u91ca\u653e\u4e0a\u4e00\u4e2a\u5a92\u4f53\u5b9e\u4f8b
+            currentMedia?.release()
+            currentMedia = null
+
             val media = Media(vlc, Uri.parse(cleanUrl)).apply {
                 setHWDecoderEnabled(false, false)
                 addOption(":network-caching=1500")
                 addOption(":http-user-agent=VLC/3.0.18 (Linux; Android)")
             }
+            currentMedia = media
 
             player.media = media
-            media.release()
+            player.volume = 100 // \u663e\u5f0f\u786e\u4fdd\u64ad\u653e\u5668\u97f3\u91cf\u4e3a 100%
             player.play()
 
             updateNotification("\u6b63\u5728\u8fde\u63a5...")
@@ -490,6 +510,8 @@ class RadioPlayerService : Service() {
         abandonAudioFocus()
         try {
             vlcPlayer?.stop()
+            currentMedia?.release()
+            currentMedia = null
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -590,6 +612,8 @@ class RadioPlayerService : Service() {
         try {
             vlcPlayer?.release()
             vlcPlayer = null
+            currentMedia?.release()
+            currentMedia = null
             libVLC?.release()
             libVLC = null
         } catch (e: Exception) {
