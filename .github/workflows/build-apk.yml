@@ -31,15 +31,14 @@ jobs:
       run: |
         gradle assembleDebug --stacktrace > build.log 2>&1 || BUILD_FAILED=1
         if [ "$BUILD_FAILED" = "1" ]; then
-          echo "## Gradle Error Summary" >> $GITHUB_STEP_SUMMARY
-          echo "```text" >> $GITHUB_STEP_SUMMARY
-          grep -E "error:|FAILURE:|FAILED|e: " build.log -A 4 -B 1 | head -n 80 >> $GITHUB_STEP_SUMMARY
-          echo "```" >> $GITHUB_STEP_SUMMARY
-          echo "### Last 60 lines" >> $GITHUB_STEP_SUMMARY
-          echo "```text" >> $GITHUB_STEP_SUMMARY
-          tail -n 60 build.log >> $GITHUB_STEP_SUMMARY
-          echo "```" >> $GITHUB_STEP_SUMMARY
-          cat build.log | tail -n 80
+          echo "=== BUILD FAILED ==="
+          tail -n 250 build.log > build_error.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B debug-log
+          git add -f build_error.txt
+          git commit -m "chore: save build failure log" || true
+          git push origin debug-log --force || true
           exit 1
         fi
 
