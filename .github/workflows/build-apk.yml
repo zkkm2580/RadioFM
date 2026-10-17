@@ -43,16 +43,19 @@ jobs:
         TAG_NAME="v1.2.0-$(date +'%Y%m%d%H%M')"
         echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
         mkdir -p release_dist
-        echo "Searching for generated APK files..."
-        find app/build/outputs/ -name "*.apk"
-        # 挑选 debug apk
-        APK_FILE=$(find app/build/outputs/ -name "*debug*.apk" | head -n 1)
-        if [ -z "$APK_FILE" ]; then
-          APK_FILE=$(find app/build/outputs/ -name "*.apk" | head -n 1)
-        fi
+        echo "=== Directory tree of app/build/outputs ==="
+        find app/build/outputs/ || true
+        echo "=== Searching for any apk in workspace ==="
+        find . -name "*.apk" || true
+        APK_FILE=$(find . -name "*.apk" | grep -v "release_dist" | head -n 1)
         echo "Selected APK: $APK_FILE"
-        cp "$APK_FILE" release_dist/RadioFM-Latest.apk
-        ls -la release_dist/
+        if [ -n "$APK_FILE" ]; then
+          cp "$APK_FILE" release_dist/RadioFM-Latest.apk
+          ls -la release_dist/
+        else
+          echo "No APK found!"
+          exit 1
+        fi
 
     - name: 上传 APK 安装包至 Artifacts
       uses: actions/upload-artifact@v4
