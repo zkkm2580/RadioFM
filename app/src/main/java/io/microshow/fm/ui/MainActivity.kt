@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.view.KeyEvent
 import android.widget.Button
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -18,7 +19,11 @@ import io.microshow.fm.data.RadioRepository
 import io.microshow.fm.model.RadioChannel
 import io.microshow.fm.player.RadioPlayerService
 
-class MainActivity : AppCompatActivity() {
+/**
+ * 畅听FM 主界面
+ * 参考 VLC (VideoPlayerActivity + PlayerKeyListenerDelegate) 架构进行车机按键分发与换台
+ */
+class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListener {
 
     private lateinit var tvCurrentChannel: TextView
     private lateinit var btnToggle: Button
@@ -29,10 +34,15 @@ class MainActivity : AppCompatActivity() {
     private var activeChannel: RadioChannel? = null
     private var currentChannels: List<RadioChannel> = emptyList()
 
+    // VLC 风格的专用按键监听委托
+    private lateinit var playerKeyListenerDelegate: PlayerKeyListenerDelegate
+    private var switchToast: Toast? = null
+
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val status = intent?.getStringExtra(RadioPlayerService.EXTRA_STATUS) ?: return
             val index = intent.getIntExtra(RadioPlayerService.EXTRA_CURRENT_INDEX, -1)
+            val isPlaying = intent.getBooleanExtra(RadioPlayerService.EXTRA_IS_PLAYING, false)
             val channel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 intent.getSerializableExtra(RadioPlayerService.EXTRA_CHANNEL, RadioChannel::class.java)
             } else {
@@ -43,7 +53,12 @@ class MainActivity : AppCompatActivity() {
             if (channel != null) {
                 activeChannel = channel
                 tvCurrentChannel.text = "${channel.name} · $status"
+            } else {
+                tvCurrentChannel.text = "畅听FM · $status"
             }
+
+            btnToggle.text = if (isPlaying) "暂停" else "播放"
+
             if (index >= 0) {
                 channelAdapter.setSelectedIndex(index)
                 rvChannels.smoothScrollToPosition(index)
@@ -56,6 +71,8 @@ class MainActivity : AppCompatActivity() {
         AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        playerKeyListenerDelegate = PlayerKeyListenerDelegate(this)
 
         tvCurrentChannel = findViewById(R.id.tv_current_channel)
         btnToggle = findViewById(R.id.btn_toggle_play)
@@ -88,6 +105,7 @@ class MainActivity : AppCompatActivity() {
         btnStop.setOnClickListener {
             RadioPlayerService.stop(this)
             tvCurrentChannel.text = "已停止播放"
+            btnToggle.text = "播放"
         }
 
         val filter = IntentFilter(RadioPlayerService.ACTION_STATUS_CHANGE)
@@ -98,38 +116,74 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // 回到前台主动同步一次 Service 的最新播放信息
+        RadioPlayerService.requestStatus(this)
+    }
+
+    // =========================================================================
+    // 参考 VLC 按键委托机制（PlayerKeyListenerDelegate.KeycodeListener 回调）
+    // =========================================================================
+
+    override fun next(): Boolean {
+        showSwitchOverlay("下一台")
+        RadioPlayerService.next(this)
+        return true
+    }
+
+    override fun previous(): Boolean {
+        showSwitchOverlay("上一台")
+        RadioPlayerService.prev(this)
+        return true
+    }
+
+    override fun play(): Boolean {
+        RadioPlayerService.togglePause(this)
+        return true
+    }
+
+    override fun pause(): Boolean {
+        RadioPlayerService.togglePause(this)
+        return true
+    }
+
+    override fun togglePause(): Boolean {
+        RadioPlayerService.togglePause(this)
+        return true
+    }
+
+    private fun showSwitchOverlay(actionText: String) {
+        try {
+            switchToast?.cancel()
+            switchToast = Toast.makeText(this, "📻 $actionText", Toast.LENGTH_SHORT)
+            switchToast?.show()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     /**
-     * 拦截车载方向盘物理按键、车载旋钮与蓝牙媒体切台按键
+     * 第一优先级：在 dispatchKeyEvent 阶段直接由 PlayerKeyListenerDelegate 拦截
+     * 解决某些车机控件（如获得焦点的 RecyclerView）吞掉按键的问题
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
-            when (event.keyCode) {
-                KeyEvent.KEYCODE_MEDIA_NEXT,
-                KeyEvent.KEYCODE_CHANNEL_UP,
-                KeyEvent.KEYCODE_PAGE_DOWN,
-                KeyEvent.KEYCODE_DPAD_DOWN,
-                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                    RadioPlayerService.next(this)
-                    return true
-                }
-                KeyEvent.KEYCODE_MEDIA_PREVIOUS,
-                KeyEvent.KEYCODE_CHANNEL_DOWN,
-                KeyEvent.KEYCODE_PAGE_UP,
-                KeyEvent.KEYCODE_DPAD_UP,
-                KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                    RadioPlayerService.prev(this)
-                    return true
-                }
-                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
-                KeyEvent.KEYCODE_MEDIA_PLAY,
-                KeyEvent.KEYCODE_MEDIA_PAUSE,
-                KeyEvent.KEYCODE_HEADSETHOOK -> {
-                    RadioPlayerService.togglePause(this)
-                    return true
-                }
+            if (playerKeyListenerDelegate.onKeyDown(event.keyCode, event)) {
+                return true
             }
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    /**
+     * 第二优先级：兜底 onKeyDown（与 VLC VideoPlayerActivity.onKeyDown 对齐）
+     */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (playerKeyListenerDelegate.onKeyDown(keyCode, event)) {
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
     }
 
     override fun onDestroy() {

@@ -37,6 +37,10 @@ import io.microshow.fm.data.RadioRepository
 import io.microshow.fm.model.RadioChannel
 import io.microshow.fm.ui.MainActivity
 
+/**
+ * 畅听FM核心播放服务
+ * 集成参考 VLC 架构的播放列表管理器（PlaylistManager）与车机媒体会话
+ */
 class RadioPlayerService : Service() {
 
     private lateinit var exoPlayer: ExoPlayer
@@ -47,51 +51,27 @@ class RadioPlayerService : Service() {
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
 
-    /**
-     * 监听各种车机（掌讯、方易通、鼎微等）私有或系统媒体按键广播
-     */
-    private val carMediaCommandReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            val action = intent?.action ?: return
-            Log.d("RadioPlayerService", "收到车载广播: $action")
-            if (action == "com.android.music.musicservicecommand") {
-                val cmd = intent.getStringExtra("command")
-                when {
-                    cmd.equals("next", ignoreCase = true) -> playNext()
-                    cmd.equals("previous", ignoreCase = true) -> playPrevious()
-                    cmd.equals("togglepause", ignoreCase = true) -> togglePlayback()
-                    cmd.equals("pause", ignoreCase = true) -> pausePlayback()
-                    cmd.equals("play", ignoreCase = true) -> resumePlayback()
-                }
-            } else if (action == Intent.ACTION_MEDIA_BUTTON) {
-                val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
-                }
-                handleMediaKeyEvent(keyEvent)
-            }
-        }
-    }
-
-    private var currentChannel: RadioChannel? = null
-    private val channelList = ArrayList<RadioChannel>()
-    private var currentIndex = -1
+    // 引入 VLC 架构的 PlaylistManager 统一管理频道列表与索引切换
+    private val playlistManager = PlaylistManager()
+    private var lastStatusText: String = "就绪"
 
     companion object {
+        private const val TAG = "RadioPlayerService"
+
         const val ACTION_PLAY = "io.microshow.fm.ACTION_PLAY"
         const val ACTION_TOGGLE_PAUSE = "io.microshow.fm.ACTION_TOGGLE_PAUSE"
         const val ACTION_STOP = "io.microshow.fm.ACTION_STOP"
         const val ACTION_NEXT = "io.microshow.fm.ACTION_NEXT"
         const val ACTION_PREV = "io.microshow.fm.ACTION_PREV"
         const val ACTION_UPDATE_PLAYLIST = "io.microshow.fm.ACTION_UPDATE_PLAYLIST"
+        const val ACTION_REQUEST_STATUS = "io.microshow.fm.ACTION_REQUEST_STATUS"
         const val ACTION_STATUS_CHANGE = "io.microshow.fm.ACTION_STATUS_CHANGE"
 
         const val EXTRA_CHANNEL = "extra_channel"
         const val EXTRA_CHANNEL_LIST = "extra_channel_list"
         const val EXTRA_STATUS = "extra_status"
         const val EXTRA_CURRENT_INDEX = "extra_current_index"
+        const val EXTRA_IS_PLAYING = "extra_is_playing"
 
         private const val CHANNEL_ID = "radio_playback_channel"
         private const val NOTIFICATION_ID = 1001
@@ -145,6 +125,41 @@ class RadioPlayerService : Service() {
                 putExtra(EXTRA_CHANNEL_LIST, ArrayList(list))
             }
             context.startService(intent)
+        }
+
+        fun requestStatus(context: Context) {
+            val intent = Intent(context, RadioPlayerService::class.java).apply {
+                action = ACTION_REQUEST_STATUS
+            }
+            context.startService(intent)
+        }
+    }
+
+    /**
+     * 监听各种车机（掌讯、方易通、鼎微等）私有或系统媒体按键广播
+     */
+    private val carMediaCommandReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val action = intent?.action ?: return
+            Log.d(TAG, "收到车载外部广播: $action")
+            if (action == "com.android.music.musicservicecommand") {
+                val cmd = intent.getStringExtra("command")
+                when {
+                    cmd.equals("next", ignoreCase = true) -> playNext()
+                    cmd.equals("previous", ignoreCase = true) -> playPrevious()
+                    cmd.equals("togglepause", ignoreCase = true) -> togglePlayback()
+                    cmd.equals("pause", ignoreCase = true) -> pausePlayback()
+                    cmd.equals("play", ignoreCase = true) -> resumePlayback()
+                }
+            } else if (action == Intent.ACTION_MEDIA_BUTTON) {
+                val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+                }
+                handleMediaKeyEvent(keyEvent)
+            }
         }
     }
 
@@ -220,11 +235,11 @@ class RadioPlayerService : Service() {
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                Log.e("RadioPlayerService", "ExoPlayer 播放错误: ${error.errorCodeName}", error)
-                currentChannel?.let { ch ->
+                Log.e(TAG, "ExoPlayer 播放错误: ${error.errorCodeName}", error)
+                playlistManager.getCurrentChannel()?.let { ch ->
                     val cleanUrl = RadioRepository.sanitizeUrl(ch.streamUrl)
                     if (!isUsingNativePlayer) {
-                        Log.d("RadioPlayerService", "自动尝试原生底层播放器...")
+                        Log.d(TAG, "自动切换至 Native MediaPlayer 备用引擎...")
                         playWithNativePlayer(cleanUrl)
                         return
                     }
@@ -304,25 +319,28 @@ class RadioPlayerService : Service() {
             .build()
     }
 
+    /**
+     * 处理车载物理键与媒体按键
+     */
     private fun handleMediaKeyEvent(keyEvent: KeyEvent?): Boolean {
         if (keyEvent?.action == KeyEvent.ACTION_DOWN) {
             when (keyEvent.keyCode) {
-                KeyEvent.KEYCODE_MEDIA_NEXT,
                 KeyEvent.KEYCODE_CHANNEL_UP,
+                KeyEvent.KEYCODE_MEDIA_NEXT,
                 KeyEvent.KEYCODE_PAGE_DOWN,
-                KeyEvent.KEYCODE_DPAD_DOWN,
                 KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
                     playNext()
                     return true
                 }
-                KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+
                 KeyEvent.KEYCODE_CHANNEL_DOWN,
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS,
                 KeyEvent.KEYCODE_PAGE_UP,
-                KeyEvent.KEYCODE_DPAD_UP,
                 KeyEvent.KEYCODE_MEDIA_REWIND -> {
                     playPrevious()
                     return true
                 }
+
                 KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
                 KeyEvent.KEYCODE_MEDIA_PLAY,
                 KeyEvent.KEYCODE_MEDIA_PAUSE,
@@ -379,10 +397,6 @@ class RadioPlayerService : Service() {
         }
     }
 
-    fun togglePlayback() {
-        if (isCurrentlyPlaying()) pausePlayback() else resumePlayback()
-    }
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.hasExtra(EXTRA_CHANNEL_LIST) == true) {
             val list = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -392,8 +406,7 @@ class RadioPlayerService : Service() {
                 intent.getSerializableExtra(EXTRA_CHANNEL_LIST) as? ArrayList<RadioChannel>
             }
             if (!list.isNullOrEmpty()) {
-                channelList.clear()
-                channelList.addAll(list)
+                playlistManager.setPlaylist(list)
             }
         }
 
@@ -406,24 +419,19 @@ class RadioPlayerService : Service() {
                     intent.getSerializableExtra(EXTRA_CHANNEL) as? RadioChannel
                 }
                 channel?.let {
-                    val idx = channelList.indexOfFirst { c -> c.streamUrl == it.streamUrl || c.name == it.name }
-                    if (idx >= 0) currentIndex = idx
+                    playlistManager.selectChannel(it)
                     playChannel(it)
                 }
             }
-            ACTION_NEXT -> {
-                playNext()
+
+            ACTION_NEXT -> playNext()
+            ACTION_PREV -> playPrevious()
+            ACTION_TOGGLE_PAUSE -> togglePlayback()
+
+            ACTION_REQUEST_STATUS -> {
+                broadcastStatus(lastStatusText)
             }
-            ACTION_PREV -> {
-                playPrevious()
-            }
-            ACTION_TOGGLE_PAUSE -> {
-                if (isCurrentlyPlaying()) {
-                    pausePlayback()
-                } else {
-                    resumePlayback()
-                }
-            }
+
             ACTION_STOP -> {
                 stopAllPlayback()
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -439,33 +447,23 @@ class RadioPlayerService : Service() {
         return START_STICKY
     }
 
+    /**
+     * VLC 模式：下一台
+     */
     fun playNext() {
-        if (channelList.isEmpty()) {
-            channelList.addAll(RadioRepository.getPresetChannels())
-        }
-        if (channelList.isEmpty()) return
-        val nextIdx = (currentIndex + 1) % channelList.size
-        playChannelAtIndex(nextIdx)
+        val target = playlistManager.next(force = true)
+        target?.let { playChannel(it) }
     }
 
+    /**
+     * VLC 模式：上一台（直播流直接换台，无5秒限制）
+     */
     fun playPrevious() {
-        if (channelList.isEmpty()) {
-            channelList.addAll(RadioRepository.getPresetChannels())
-        }
-        if (channelList.isEmpty()) return
-        val prevIdx = if (currentIndex <= 0) channelList.size - 1 else currentIndex - 1
-        playChannelAtIndex(prevIdx)
-    }
-
-    private fun playChannelAtIndex(index: Int) {
-        if (index in channelList.indices) {
-            currentIndex = index
-            playChannel(channelList[index])
-        }
+        val target = playlistManager.previous(force = true)
+        target?.let { playChannel(it) }
     }
 
     private fun playChannel(channel: RadioChannel) {
-        currentChannel = channel
         requestAudioFocus()
         val cleanUrl = RadioRepository.sanitizeUrl(channel.streamUrl)
 
@@ -477,10 +475,10 @@ class RadioPlayerService : Service() {
         }
 
         if (isTvheadendOrTs(cleanUrl)) {
-            Log.d("RadioPlayerService", "检测到 Tvheadend/TS 流，使用专用原生底层引擎播放: $cleanUrl")
+            Log.d(TAG, "检测到 Tvheadend/TS 流，使用专用原生底层引擎播放: $cleanUrl")
             playWithNativePlayer(cleanUrl)
         } else {
-            Log.d("RadioPlayerService", "使用 ExoPlayer 引擎播放: $cleanUrl")
+            Log.d(TAG, "使用 ExoPlayer 引擎播放: $cleanUrl")
             playWithExoPlayer(cleanUrl)
         }
     }
@@ -509,7 +507,7 @@ class RadioPlayerService : Service() {
                     broadcastStatus("播放结束")
                 }
                 setOnErrorListener { _, what, extra ->
-                    Log.e("RadioPlayerService", "Native MediaPlayer 错误: what=$what, extra=$extra")
+                    Log.e(TAG, "Native MediaPlayer 错误: what=$what, extra=$extra")
                     isUsingNativePlayer = false
                     playWithExoPlayer(url)
                     true
@@ -520,7 +518,7 @@ class RadioPlayerService : Service() {
             updateNotification("正在缓冲(TS)...")
             broadcastStatus("正在缓冲...")
         } catch (e: Exception) {
-            Log.e("RadioPlayerService", "Native MediaPlayer 启动异常", e)
+            Log.e(TAG, "Native MediaPlayer 启动异常", e)
             playWithExoPlayer(url)
         }
     }
@@ -549,6 +547,10 @@ class RadioPlayerService : Service() {
         } else {
             exoPlayer.isPlaying
         }
+    }
+
+    fun togglePlayback() {
+        if (isCurrentlyPlaying()) pausePlayback() else resumePlayback()
     }
 
     fun pausePlayback() {
@@ -591,16 +593,21 @@ class RadioPlayerService : Service() {
     }
 
     private fun broadcastStatus(status: String) {
+        lastStatusText = status
+        val currentChannel = playlistManager.getCurrentChannel()
+        val currentIndex = playlistManager.getCurrentIndex()
         val intent = Intent(ACTION_STATUS_CHANGE).apply {
             putExtra(EXTRA_STATUS, status)
             putExtra(EXTRA_CURRENT_INDEX, currentIndex)
             putExtra(EXTRA_CHANNEL, currentChannel)
+            putExtra(EXTRA_IS_PLAYING, isCurrentlyPlaying())
             setPackage(packageName)
         }
         sendBroadcast(intent)
     }
 
     private fun buildNotification(statusText: String): Notification {
+        val currentChannel = playlistManager.getCurrentChannel()
         val channelName = currentChannel?.name ?: "畅听电台"
         val freq = currentChannel?.frequency ?: "网络广播"
 

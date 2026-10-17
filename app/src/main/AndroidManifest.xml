@@ -28,7 +28,11 @@
         <service
             android:name=".player.RadioPlayerService"
             android:foregroundServiceType="mediaPlayback"
-            android:exported="false" />
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </service>
 
         <!-- 车载方向盘按键与蓝牙媒体按键静态接收器 -->
         <receiver
