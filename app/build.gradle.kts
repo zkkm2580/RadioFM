@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "io.nbhg.fm"
+    namespace = "io.microshow.fm"
     compileSdk = 34
 
     defaultConfig {
