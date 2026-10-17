@@ -28,7 +28,14 @@ jobs:
         gradle-version: '8.5'
 
     - name: 编译 Debug APK
-      run: gradle assembleDebug --stacktrace
+      run: |
+        gradle assembleDebug --stacktrace --info 2>&1 | tee build.log || {
+          echo "## Build Failure Log" >> $GITHUB_STEP_SUMMARY
+          echo "```" >> $GITHUB_STEP_SUMMARY
+          tail -n 120 build.log >> $GITHUB_STEP_SUMMARY
+          echo "```" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        }
 
     - name: 整理发布 APK 文件
       id: release_apk
