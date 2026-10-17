@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "io.microshow.fm"
+    namespace = "io.nbhg.fm"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "io.microshow.fm"
+        applicationId = "io.nbhg.fm"
         minSdk = 21
         targetSdk = 34
         versionCode = 2
