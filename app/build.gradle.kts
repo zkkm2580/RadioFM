@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "io.nbhg.fm"
+    namespace = "io.microshow.fm"
     compileSdk = 34
 
     defaultConfig {
@@ -43,8 +43,8 @@ dependencies {
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
 
-    // 官方 VLC Android 原生核心 (集成 FFmpeg 软解，支持 MPEG-TS、MP2、HLS、AAC 等全量流媒体格式)
-    implementation("org.videolan.android:libvlc-all:3.6.2")
+    // 官方 VLC Android 原生引擎 (内置 FFmpeg 软解，支持 MPEG-TS、MP2、HLS、AAC 等全套流媒体格式)
+    implementation("org.videolan.android:libvlc-all:3.6.0")
 
     // 车载 MediaSession 与 MediaStyle 通知栏
     implementation("androidx.media:media:1.7.0")
