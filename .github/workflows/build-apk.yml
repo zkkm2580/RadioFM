@@ -28,7 +28,13 @@ jobs:
         gradle-version: '8.5'
 
     - name: 编译 Debug APK
-      run: gradle assembleDebug --stacktrace
+      run: |
+        gradle assembleDebug --stacktrace --info > build.log 2>&1 || BUILD_FAILED=1
+        if [ "$BUILD_FAILED" = "1" ]; then
+          echo "BUILD FAILED! Last 150 lines of log:"
+          tail -n 150 build.log
+          exit 1
+        fi
 
     - name: 整理发布 APK 文件
       id: release_apk
@@ -39,6 +45,13 @@ jobs:
         cp app/build/outputs/apk/debug/*.apk release_dist/RadioFM-Latest.apk
         ls -la release_dist/
 
+    - name: 上传编译日志（排查用）
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: gradle-build-log
+        path: build.log
+        retention-days: 1
     - name: 上传 APK 安装包至 Artifacts
       uses: actions/upload-artifact@v4
       with:
