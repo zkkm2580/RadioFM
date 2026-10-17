@@ -16,29 +16,35 @@ import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
-import android.support.v4.media.session.MediaSessionCompat
-import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Log
 import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
+import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.session.MediaSession
 import io.microshow.fm.R
 import io.microshow.fm.data.RadioRepository
 import io.microshow.fm.model.RadioChannel
 import io.microshow.fm.ui.MainActivity
-import org.videolan.libvlc.LibVLC
-import org.videolan.libvlc.Media
-import org.videolan.libvlc.MediaPlayer
 
+/**
+ * \u7545\u542cFM \u6838\u5fc3\u64ad\u653e\u670d\u52a1 (ExoPlayer \u8f7b\u91cf\u7ea7\u9ad8\u80fd\u6548\u5f15\u64ce)
+ * \u4fdd\u7559\u8f66\u8f7d\u65b9\u5411\u76d8\u6309\u952e\u6df1\u5ea6\u62e6\u622a\u3001MediaSession \u8f66\u8f7d\u63a7\u5236\u534f\u8bae\u3001\u591c\u95f4\u6a21\u5f0f\u4e0e\u64ad\u653e\u5217\u8868\u5207\u6362
+ */
 class RadioPlayerService : Service() {
 
-    private var libVLC: LibVLC? = null
-    private var vlcPlayer: MediaPlayer? = null
-    private var currentMedia: Media? = null
-
-    private lateinit var mediaSession: MediaSessionCompat
+    private lateinit var exoPlayer: ExoPlayer
+    private var mediaSession: MediaSession? = null
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
 
+    // \u91c7\u7528 PlaylistManager \u7edf\u4e00\u7ba1\u7406\u9891\u9053\u5217\u8868\u4e0e\u5e73\u6ed1\u5207\u53f0
     private val playlistManager = PlaylistManager()
     private var lastStatusText: String = "\u5c31\u7eea"
 
@@ -122,6 +128,9 @@ class RadioPlayerService : Service() {
         }
     }
 
+    /**
+     * \u8f66\u8f7d\u5382\u5546\u79c1\u6709\u5207\u6b4c\u5e7f\u64ad\u63a5\u6536\u5668
+     */
     private val carMediaCommandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val action = intent?.action ?: return
@@ -150,10 +159,9 @@ class RadioPlayerService : Service() {
     override fun onCreate() {
         super.onCreate()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        initMediaSession()
+        initExoPlayer()
         createNotificationChannel()
         registerCarMediaReceiver()
-        initLibVLC()
     }
 
     private fun registerCarMediaReceiver() {
@@ -171,141 +179,118 @@ class RadioPlayerService : Service() {
         }
     }
 
-    private fun initMediaSession() {
-        mediaSession = MediaSessionCompat(this, "RadioFMSession").apply {
-            setFlags(
-                MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
-                MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
-            )
-            setPlaybackState(
-                PlaybackStateCompat.Builder()
-                    .setActions(
-                        PlaybackStateCompat.ACTION_PLAY or
-                        PlaybackStateCompat.ACTION_PAUSE or
-                        PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                        PlaybackStateCompat.ACTION_STOP
-                    )
-                    .setState(PlaybackStateCompat.STATE_NONE, 0, 1.0f)
+    private fun initExoPlayer() {
+        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+            .setConnectTimeoutMs(15000)
+            .setReadTimeoutMs(15000)
+            .setAllowCrossProtocolRedirects(true)
+
+        val mediaSourceFactory = DefaultMediaSourceFactory(httpDataSourceFactory)
+
+        exoPlayer = ExoPlayer.Builder(this)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .setHandleAudioBecomingNoisy(true)
+            .build()
+
+        exoPlayer.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                val status = when (state) {
+                    Player.STATE_BUFFERING -> "\u6b63\u5728\u7f13\u51b2..."
+                    Player.STATE_READY -> if (exoPlayer.isPlaying) "\u6b63\u5728\u64ad\u653e" else "\u5df2\u6682\u505c"
+                    Player.STATE_ENDED -> "\u64ad\u653e\u7ed3\u675f"
+                    else -> "\u5c31\u7eea"
+                }
+                updateNotification(status)
+                broadcastStatus(status)
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                val status = if (isPlaying) "\u6b63\u5728\u64ad\u653e" else "\u5df2\u6682\u505c"
+                updateNotification(status)
+                broadcastStatus(status)
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                Log.e(TAG, "ExoPlayer \u64ad\u653e\u9519\u8bef: ${error.errorCodeName}", error)
+                val status = "\u8fde\u63a5\u91cd\u8bd5\u4e2d..."
+                updateNotification(status)
+                broadcastStatus(status)
+                exoPlayer.prepare()
+                exoPlayer.play()
+            }
+        })
+
+        // \u901a\u8fc7 ForwardingPlayer \u62e6\u622a\u8f66\u8f7d\u4e2d\u63a7\u5207\u53f0\u3001\u4e0b\u4e00\u66f2\u6307\u4ee4
+        val forwardingPlayer = object : ForwardingPlayer(exoPlayer) {
+            override fun play() {
+                resumePlayback()
+            }
+            override fun pause() {
+                pausePlayback()
+            }
+            override fun isPlaying(): Boolean {
+                return isCurrentlyPlaying()
+            }
+            override fun seekToNext() {
+                playNext()
+            }
+            override fun seekToNextMediaItem() {
+                playNext()
+            }
+            override fun seekToPrevious() {
+                playPrevious()
+            }
+            override fun seekToPreviousMediaItem() {
+                playPrevious()
+            }
+            override fun getAvailableCommands(): Player.Commands {
+                return super.getAvailableCommands().buildUpon()
+                    .add(Player.COMMAND_PLAY_PAUSE)
+                    .add(Player.COMMAND_SEEK_TO_NEXT)
+                    .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
                     .build()
-            )
-            setCallback(object : MediaSessionCompat.Callback() {
-                override fun onPlay() { resumePlayback() }
-                override fun onPause() { pausePlayback() }
-                override fun onSkipToNext() { playNext() }
-                override fun onSkipToPrevious() { playPrevious() }
-                override fun onStop() { stopAllPlayback() }
-                override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
-                    val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        mediaButtonEvent?.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        mediaButtonEvent?.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
-                    }
-                    if (handleMediaKeyEvent(keyEvent)) {
-                        return true
-                    }
-                    return super.onMediaButtonEvent(mediaButtonEvent)
+            }
+            override fun isCommandAvailable(command: Int): Boolean {
+                if (command == Player.COMMAND_PLAY_PAUSE ||
+                    command == Player.COMMAND_SEEK_TO_NEXT ||
+                    command == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM ||
+                    command == Player.COMMAND_SEEK_TO_PREVIOUS ||
+                    command == Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM) {
+                    return true
                 }
-            })
-            isActive = true
-        }
-    }
-
-    private fun initLibVLC() {
-        if (libVLC == null) {
-            // \u91c7\u7528\u4e0e\u5b98\u65b9 VLC \u5ba2\u6237\u7aef\u5b8c\u5168\u4e00\u81f4\u7684\u7eaf\u51c0\u81ea\u9002\u5e94\u53c2\u6570\uff0c\u4e0d\u5199\u6b7b aout \u6216 no-video\uff0c\u786e\u4fdd\u517c\u5bb9\u5404\u7c7b\u8f66\u673a\u58f0\u5361\u4e0e TS \u65f6\u949f
-            val options = ArrayList<String>().apply {
-                add("--network-caching=1500")   // 1.5 \u79d2\u7f51\u7edc\u7f13\u5b58\uff0c\u79d2\u5f00\u6297\u6296\u52a8
-                add("--http-reconnect")          // \u7f51\u7edc\u95ea\u65ad\u81ea\u52a8\u91cd\u8fde
-                add("--no-spu")                  // \u5173\u95ed\u5b57\u5e55
-            }
-            try {
-                libVLC = LibVLC(applicationContext, options)
-            } catch (e: Exception) {
-                Log.e(TAG, "\u521d\u59cb\u5316 LibVLC \u5931\u8d25", e)
+                return super.isCommandAvailable(command)
             }
         }
 
-        if (vlcPlayer == null && libVLC != null) {
-            try {
-                vlcPlayer = MediaPlayer(libVLC).apply {
-                    setEventListener { event ->
-                        when (event.type) {
-                            MediaPlayer.Event.Buffering -> {
-                                val percent = event.buffering.toInt()
-                                val status = "\u6b63\u5728\u7f13\u51b2 $percent%..."
-                                updateNotification(status)
-                                broadcastStatus(status)
-                                updatePlaybackState(PlaybackStateCompat.STATE_BUFFERING)
-                            }
-                            MediaPlayer.Event.Playing -> {
-                                updateNotification("\u6b63\u5728\u64ad\u653e")
-                                broadcastStatus("\u6b63\u5728\u64ad\u653e")
-                                updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
-                                // \u515c\u5e95\u786e\u4fdd\u97f3\u91cf\u4e3a 100% \u5e76\u4e14\u6fc0\u6d3b\u53ef\u7528\u97f3\u8f68
-                                try {
-                                    vlcPlayer?.volume = 100
-                                    val currentTrack = vlcPlayer?.audioTrack ?: -1
-                                    if (currentTrack == -1) {
-                                        val tracks = vlcPlayer?.audioTracks
-                                        val firstValid = tracks?.firstOrNull { it.id > 0 }
-                                        firstValid?.let {
-                                            Log.d(TAG, "\u81ea\u52a8\u6fc0\u6d3b\u97f3\u8f68: ${it.id} (${it.name})")
-                                            vlcPlayer?.setAudioTrack(it.id)
-                                        }
-                                    }
-                                } catch (e: Exception) {
-                                    Log.w(TAG, "\u68c0\u67e5\u97f3\u8f68\u914d\u7f6e\u5f02\u5e38", e)
-                                }
-                            }
-                            MediaPlayer.Event.Paused -> {
-                                updateNotification("\u5df2\u6682\u505c")
-                                broadcastStatus("\u5df2\u6682\u505c")
-                                updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
-                            }
-                            MediaPlayer.Event.Stopped -> {
-                                updateNotification("\u5df2\u505c\u6b62")
-                                broadcastStatus("\u5df2\u505c\u6b62")
-                                updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
-                            }
-                            MediaPlayer.Event.EndReached -> {
-                                updateNotification("\u64ad\u653e\u7ed3\u675f")
-                                broadcastStatus("\u64ad\u653e\u7ed3\u675f")
-                                updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
-                            }
-                            MediaPlayer.Event.EncounteredError -> {
-                                Log.e(TAG, "LibVLC \u64ad\u653e\u9047\u5230\u9519\u8bef")
-                                updateNotification("\u8fde\u63a5\u5931\u8d25\uff0c\u91cd\u8bd5\u4e2d...")
-                                broadcastStatus("\u8fde\u63a5\u5931\u8d25\uff0c\u91cd\u8bd5\u4e2d...")
-                                updatePlaybackState(PlaybackStateCompat.STATE_ERROR)
-                            }
-                        }
-                    }
+        val sessionCallback = object : MediaSession.Callback {
+            override fun onMediaButtonEvent(
+                session: MediaSession,
+                controllerInfo: MediaSession.ControllerInfo,
+                intent: Intent
+            ): Boolean {
+                val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "\u521b\u5efa LibVLC MediaPlayer \u5931\u8d25", e)
+                if (handleMediaKeyEvent(keyEvent)) {
+                    return true
+                }
+                return super.onMediaButtonEvent(session, controllerInfo, intent)
             }
         }
+
+        mediaSession = MediaSession.Builder(this, forwardingPlayer)
+            .setCallback(sessionCallback)
+            .build()
     }
 
-    private fun updatePlaybackState(state: Int) {
-        val actions = PlaybackStateCompat.ACTION_PLAY or
-                PlaybackStateCompat.ACTION_PAUSE or
-                PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                PlaybackStateCompat.ACTION_STOP
-
-        mediaSession.setPlaybackState(
-            PlaybackStateCompat.Builder()
-                .setActions(actions)
-                .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
-                .build()
-        )
-    }
-
+    /**
+     * \u5904\u7406\u65b9\u5411\u76d8\u786c\u4ef6\u4e0e\u5a92\u4f53\u6309\u952e
+     */
     private fun handleMediaKeyEvent(keyEvent: KeyEvent?): Boolean {
         if (keyEvent?.action == KeyEvent.ACTION_DOWN) {
             when (keyEvent.keyCode) {
@@ -452,39 +437,20 @@ class RadioPlayerService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
-        try {
-            initLibVLC()
-            val player = vlcPlayer ?: return
-            val vlc = libVLC ?: return
-
-            player.stop()
-
-            // \u4f18\u96c5\u91ca\u653e\u4e0a\u4e00\u4e2a\u5a92\u4f53\u5b9e\u4f8b
-            currentMedia?.release()
-            currentMedia = null
-
-            val media = Media(vlc, Uri.parse(cleanUrl)).apply {
-                setHWDecoderEnabled(false, false)
-                addOption(":network-caching=1500")
-                addOption(":http-user-agent=VLC/3.0.18 (Linux; Android)")
-            }
-            currentMedia = media
-
-            player.media = media
-            player.volume = 100 // \u663e\u5f0f\u786e\u4fdd\u64ad\u653e\u5668\u97f3\u91cf\u4e3a 100%
-            player.play()
-
-            updateNotification("\u6b63\u5728\u8fde\u63a5...")
-            broadcastStatus("\u6b63\u5728\u8fde\u63a5...")
-            updatePlaybackState(PlaybackStateCompat.STATE_BUFFERING)
-        } catch (e: Exception) {
-            Log.e(TAG, "LibVLC \u64ad\u653e\u542f\u52a8\u5f02\u5e38", e)
-            broadcastStatus("\u8fde\u63a5\u5931\u8d25")
+        val mediaItemBuilder = MediaItem.Builder().setUri(cleanUrl)
+        if (cleanUrl.contains(".m3u8", ignoreCase = true)) {
+            mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
         }
+
+        exoPlayer.setMediaItem(mediaItemBuilder.build())
+        exoPlayer.prepare()
+        exoPlayer.play()
+        updateNotification("\u6b63\u5728\u8fde\u63a5...")
+        broadcastStatus("\u6b63\u5728\u8fde\u63a5...")
     }
 
     fun isCurrentlyPlaying(): Boolean {
-        return vlcPlayer?.isPlaying == true
+        return exoPlayer.isPlaying
     }
 
     fun togglePlayback() {
@@ -492,30 +458,25 @@ class RadioPlayerService : Service() {
     }
 
     fun pausePlayback() {
-        vlcPlayer?.pause()
+        exoPlayer.pause()
         updateNotification("\u5df2\u6682\u505c")
         broadcastStatus("\u5df2\u6682\u505c")
-        updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
     }
 
     fun resumePlayback() {
         requestAudioFocus()
-        vlcPlayer?.play()
+        exoPlayer.play()
         updateNotification("\u6b63\u5728\u64ad\u653e")
         broadcastStatus("\u6b63\u5728\u64ad\u653e")
-        updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
     }
 
     fun stopAllPlayback() {
         abandonAudioFocus()
         try {
-            vlcPlayer?.stop()
-            currentMedia?.release()
-            currentMedia = null
+            exoPlayer.stop()
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
     }
 
     private fun broadcastStatus(status: String) {
@@ -575,17 +536,11 @@ class RadioPlayerService : Service() {
             .addAction(android.R.drawable.ic_media_next, "\u4e0b\u4e00\u53f0", pNext)
             .setStyle(
                 androidx.media.app.NotificationCompat.MediaStyle()
-                    .setMediaSession(mediaSession.sessionToken)
                     .setShowActionsInCompactView(0, 1, 2)
             )
             .setOngoing(isPlaying)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
-    }
-
-    private fun updateNotification(statusText: String) {
-        val manager = getSystemService(NotificationManager::class.java)
-        manager?.notify(NOTIFICATION_ID, buildNotification(statusText))
     }
 
     private fun createNotificationChannel() {
@@ -610,17 +565,13 @@ class RadioPlayerService : Service() {
         }
         stopAllPlayback()
         try {
-            vlcPlayer?.release()
-            vlcPlayer = null
-            currentMedia?.release()
-            currentMedia = null
-            libVLC?.release()
-            libVLC = null
+            exoPlayer.release()
         } catch (e: Exception) {
             e.printStackTrace()
         }
         try {
-            mediaSession.release()
+            mediaSession?.release()
+            mediaSession = null
         } catch (e: Exception) {
             e.printStackTrace()
         }
