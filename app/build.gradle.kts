@@ -11,8 +11,8 @@ android {
         applicationId = "io.microshow.fm"
         minSdk = 21
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -43,13 +43,9 @@ dependencies {
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.recyclerview:recyclerview:1.3.2")
 
-    // 经典车载 Media 兼容支持
-    implementation("androidx.media:media:1.7.0")
+    // 官方 VLC Android 原生核心 (集成 FFmpeg 软解，支持 MPEG-TS、MP2、HLS、AAC 等全量流媒体格式)
+    implementation("org.videolan.android:libvlc-all:3.6.2")
 
-    // Media3 / ExoPlayer 核心组件
-    implementation("androidx.media3:media3-exoplayer:1.2.1")
-    implementation("androidx.media3:media3-exoplayer-hls:1.2.1")
-    implementation("androidx.media3:media3-exoplayer-rtsp:1.2.1")
-    implementation("androidx.media3:media3-ui:1.2.1")
-    implementation("androidx.media3:media3-session:1.2.1")
+    // 车载 MediaSession 与 MediaStyle 通知栏
+    implementation("androidx.media:media:1.7.0")
 }
