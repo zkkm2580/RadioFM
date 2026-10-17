@@ -40,10 +40,19 @@ jobs:
     - name: 整理发布 APK 文件
       id: release_apk
       run: |
-        TAG_NAME="v1.1.0-$(date +'%Y%m%d%H%M')"
+        TAG_NAME="v1.2.0-$(date +'%Y%m%d%H%M')"
         echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
         mkdir -p release_dist
-        cp app/build/outputs/apk/debug/*.apk release_dist/RadioFM-Latest.apk
+        echo "Searching for generated APK files..."
+        find app/build/outputs/ -name "*.apk"
+        # 挑选 debug apk
+        APK_FILE=$(find app/build/outputs/ -name "*debug*.apk" | head -n 1)
+        if [ -z "$APK_FILE" ]; then
+          APK_FILE=$(find app/build/outputs/ -name "*.apk" | head -n 1)
+        fi
+        echo "Selected APK: $APK_FILE"
+        cp "$APK_FILE" release_dist/RadioFM-Latest.apk
+        ls -la release_dist/
 
     - name: 上传 APK 安装包至 Artifacts
       uses: actions/upload-artifact@v4
@@ -56,7 +65,7 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.release_apk.outputs.tag_name }}
-        name: 畅听FM v1.1.0 (${{ steps.release_apk.outputs.tag_name }})
+        name: 畅听FM v1.2.0 (${{ steps.release_apk.outputs.tag_name }})
         body: |
           ### 畅听FM (RadioFM) 更新说明
           
