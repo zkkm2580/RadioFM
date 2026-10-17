@@ -13,47 +13,33 @@ import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.support.v4.media.session.MediaSessionCompat
+import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Log
 import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
-import androidx.media3.common.ForwardingPlayer
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MimeTypes
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.extractor.DefaultExtractorsFactory
-import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
-import androidx.media3.extractor.ts.TsExtractor
-import androidx.media3.session.MediaSession
 import io.microshow.fm.R
 import io.microshow.fm.data.RadioRepository
 import io.microshow.fm.model.RadioChannel
 import io.microshow.fm.ui.MainActivity
+import org.videolan.libvlc.LibVLC
+import org.videolan.libvlc.Media
+import org.videolan.libvlc.MediaPlayer
 
-/**
- * 畅听FM核心播放服务
- * 集成参考 VLC 架构的播放列表管理器（PlaylistManager）与车机媒体会话
- */
 class RadioPlayerService : Service() {
 
-    private lateinit var exoPlayer: ExoPlayer
-    private var nativePlayer: MediaPlayer? = null
-    private var isUsingNativePlayer = false
+    private var libVLC: LibVLC? = null
+    private var vlcPlayer: MediaPlayer? = null
 
-    private var mediaSession: MediaSession? = null
+    private lateinit var mediaSession: MediaSessionCompat
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
 
-    // 引入 VLC 架构的 PlaylistManager 统一管理频道列表与索引切换
     private val playlistManager = PlaylistManager()
-    private var lastStatusText: String = "就绪"
+    private var lastStatusText: String = "\u5c31\u7eea"
 
     companion object {
         private const val TAG = "RadioPlayerService"
@@ -135,13 +121,10 @@ class RadioPlayerService : Service() {
         }
     }
 
-    /**
-     * 监听各种车机（掌讯、方易通、鼎微等）私有或系统媒体按键广播
-     */
     private val carMediaCommandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val action = intent?.action ?: return
-            Log.d(TAG, "收到车载外部广播: $action")
+            Log.d(TAG, "\u6536\u5230\u8f66\u8f7d\u5916\u90e8\u5e7f\u64ad: $action")
             if (action == "com.android.music.musicservicecommand") {
                 val cmd = intent.getStringExtra("command")
                 when {
@@ -166,9 +149,10 @@ class RadioPlayerService : Service() {
     override fun onCreate() {
         super.onCreate()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        initExoPlayer()
+        initMediaSession()
         createNotificationChannel()
         registerCarMediaReceiver()
+        initLibVLC()
     }
 
     private fun registerCarMediaReceiver() {
@@ -186,142 +170,127 @@ class RadioPlayerService : Service() {
         }
     }
 
-    private fun isTvheadendOrTs(url: String): Boolean {
-        return url.contains(":8168", ignoreCase = true) ||
-               url.contains("/stream/", ignoreCase = true) ||
-               url.contains(".ts", ignoreCase = true) ||
-               url.contains("audio/mp2t", ignoreCase = true)
+    private fun initMediaSession() {
+        mediaSession = MediaSessionCompat(this, "RadioFMSession").apply {
+            setFlags(
+                MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
+                MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
+            )
+            setPlaybackState(
+                PlaybackStateCompat.Builder()
+                    .setActions(
+                        PlaybackStateCompat.ACTION_PLAY or
+                        PlaybackStateCompat.ACTION_PAUSE or
+                        PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                        PlaybackStateCompat.ACTION_STOP
+                    )
+                    .setState(PlaybackStateCompat.STATE_NONE, 0, 1.0f)
+                    .build()
+            )
+            setCallback(object : MediaSessionCompat.Callback() {
+                override fun onPlay() { resumePlayback() }
+                override fun onPause() { pausePlayback() }
+                override fun onSkipToNext() { playNext() }
+                override fun onSkipToPrevious() { playPrevious() }
+                override fun onStop() { stopAllPlayback() }
+                override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
+                    val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        mediaButtonEvent?.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        mediaButtonEvent?.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+                    }
+                    if (handleMediaKeyEvent(keyEvent)) {
+                        return true
+                    }
+                    return super.onMediaButtonEvent(mediaButtonEvent)
+                }
+            })
+            isActive = true
+        }
     }
 
-    private fun initExoPlayer() {
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("VLC/3.0.18 (Linux; Android)")
-            .setConnectTimeoutMs(20000)
-            .setReadTimeoutMs(20000)
-            .setAllowCrossProtocolRedirects(true)
-
-        val extractorsFactory = DefaultExtractorsFactory()
-            .setTsExtractorFlags(
-                DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
-                DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS
-            )
-            .setTsExtractorMode(TsExtractor.MODE_MULTI_PMT)
-
-        val mediaSourceFactory = DefaultMediaSourceFactory(httpDataSourceFactory, extractorsFactory)
-
-        exoPlayer = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(mediaSourceFactory)
-            .setHandleAudioBecomingNoisy(true)
-            .build()
-
-        exoPlayer.addListener(object : Player.Listener {
-            override fun onPlaybackStateChanged(state: Int) {
-                if (isUsingNativePlayer) return
-                val status = when (state) {
-                    Player.STATE_BUFFERING -> "正在缓冲..."
-                    Player.STATE_READY -> if (exoPlayer.isPlaying) "正在播放" else "已暂停"
-                    Player.STATE_ENDED -> "播放结束"
-                    else -> "就绪"
-                }
-                updateNotification(status)
-                broadcastStatus(status)
+    private fun initLibVLC() {
+        if (libVLC == null) {
+            val options = ArrayList<String>().apply {
+                add("--no-video")               // \u7eaf\u97f3\u9891\u6a21\u5f0f\uff0c\u4e0d\u542f\u52a8\u89c6\u9891\u7ba1\u7ebf\uff0c\u7701\u7535\u7701\u5185\u5b58
+                add("--aout=android_audiotrack") // \u76f4\u63a5\u4f7f\u7528 AudioTrack \u58f0\u5361\u8f93\u51fa
+                add("--network-caching=1500")   // 1.5 \u79d2\u7f51\u7edc\u7f13\u5b58\uff0c\u79d2\u5f00\u6297\u6296\u52a8
+                add("--http-reconnect")          // \u7f51\u7edc\u95ea\u65ad\u81ea\u52a8\u91cd\u8fde
+                add("--no-spu")                  // \u5173\u95ed\u5b57\u5e55
             }
-
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (isUsingNativePlayer) return
-                val status = if (isPlaying) "正在播放" else "已暂停"
-                updateNotification(status)
-                broadcastStatus(status)
+            try {
+                libVLC = LibVLC(applicationContext, options)
+            } catch (e: Exception) {
+                Log.e(TAG, "\u521d\u59cb\u5316 LibVLC \u5931\u8d25", e)
             }
+        }
 
-            override fun onPlayerError(error: PlaybackException) {
-                Log.e(TAG, "ExoPlayer 播放错误: ${error.errorCodeName}", error)
-                playlistManager.getCurrentChannel()?.let { ch ->
-                    val cleanUrl = RadioRepository.sanitizeUrl(ch.streamUrl)
-                    if (!isUsingNativePlayer) {
-                        Log.d(TAG, "自动切换至 Native MediaPlayer 备用引擎...")
-                        playWithNativePlayer(cleanUrl)
-                        return
+        if (vlcPlayer == null && libVLC != null) {
+            try {
+                vlcPlayer = MediaPlayer(libVLC).apply {
+                    setEventListener { event ->
+                        when (event.type) {
+                            MediaPlayer.Event.Buffering -> {
+                                val percent = event.buffering.toInt()
+                                val status = "\u6b63\u5728\u7f13\u51b2 $percent%..."
+                                updateNotification(status)
+                                broadcastStatus(status)
+                                updatePlaybackState(PlaybackStateCompat.STATE_BUFFERING)
+                            }
+                            MediaPlayer.Event.Playing -> {
+                                updateNotification("\u6b63\u5728\u64ad\u653e")
+                                broadcastStatus("\u6b63\u5728\u64ad\u653e")
+                                updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
+                            }
+                            MediaPlayer.Event.Paused -> {
+                                updateNotification("\u5df2\u6682\u505c")
+                                broadcastStatus("\u5df2\u6682\u505c")
+                                updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
+                            }
+                            MediaPlayer.Event.Stopped -> {
+                                updateNotification("\u5df2\u505c\u6b62")
+                                broadcastStatus("\u5df2\u505c\u6b62")
+                                updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
+                            }
+                            MediaPlayer.Event.EndReached -> {
+                                updateNotification("\u64ad\u653e\u7ed3\u675f")
+                                broadcastStatus("\u64ad\u653e\u7ed3\u675f")
+                                updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
+                            }
+                            MediaPlayer.Event.EncounteredError -> {
+                                Log.e(TAG, "LibVLC \u64ad\u653e\u9047\u5230\u9519\u8bef")
+                                updateNotification("\u8fde\u63a5\u5931\u8d25\uff0c\u91cd\u8bd5\u4e2d...")
+                                broadcastStatus("\u8fde\u63a5\u5931\u8d25\uff0c\u91cd\u8bd5\u4e2d...")
+                                updatePlaybackState(PlaybackStateCompat.STATE_ERROR)
+                            }
+                        }
                     }
                 }
-                val status = "播放重试中..."
-                updateNotification(status)
-                broadcastStatus(status)
-                exoPlayer.prepare()
-                exoPlayer.play()
-            }
-        })
-
-        val forwardingPlayer = object : ForwardingPlayer(exoPlayer) {
-            override fun play() {
-                resumePlayback()
-            }
-            override fun pause() {
-                pausePlayback()
-            }
-            override fun isPlaying(): Boolean {
-                return isCurrentlyPlaying()
-            }
-            override fun seekToNext() {
-                playNext()
-            }
-            override fun seekToNextMediaItem() {
-                playNext()
-            }
-            override fun seekToPrevious() {
-                playPrevious()
-            }
-            override fun seekToPreviousMediaItem() {
-                playPrevious()
-            }
-            override fun getAvailableCommands(): Player.Commands {
-                return super.getAvailableCommands().buildUpon()
-                    .add(Player.COMMAND_PLAY_PAUSE)
-                    .add(Player.COMMAND_SEEK_TO_NEXT)
-                    .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
-                    .add(Player.COMMAND_SEEK_TO_PREVIOUS)
-                    .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
-                    .build()
-            }
-            override fun isCommandAvailable(command: Int): Boolean {
-                if (command == Player.COMMAND_PLAY_PAUSE ||
-                    command == Player.COMMAND_SEEK_TO_NEXT ||
-                    command == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM ||
-                    command == Player.COMMAND_SEEK_TO_PREVIOUS ||
-                    command == Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM) {
-                    return true
-                }
-                return super.isCommandAvailable(command)
+            } catch (e: Exception) {
+                Log.e(TAG, "\u521b\u5efa LibVLC MediaPlayer \u5931\u8d25", e)
             }
         }
-
-        val sessionCallback = object : MediaSession.Callback {
-            override fun onMediaButtonEvent(
-                session: MediaSession,
-                controllerInfo: MediaSession.ControllerInfo,
-                intent: Intent
-            ): Boolean {
-                val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
-                } else {
-                    @Suppress("DEPRECATION")
-                    intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
-                }
-                if (handleMediaKeyEvent(keyEvent)) {
-                    return true
-                }
-                return super.onMediaButtonEvent(session, controllerInfo, intent)
-            }
-        }
-
-        mediaSession = MediaSession.Builder(this, forwardingPlayer)
-            .setCallback(sessionCallback)
-            .build()
     }
 
-    /**
-     * 处理车载物理键与媒体按键
-     */
+    private fun updatePlaybackState(state: Int) {
+        val actions = PlaybackStateCompat.ACTION_PLAY or
+                PlaybackStateCompat.ACTION_PAUSE or
+                PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                PlaybackStateCompat.ACTION_STOP
+
+        mediaSession.setPlaybackState(
+            PlaybackStateCompat.Builder()
+                .setActions(actions)
+                .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+                .build()
+        )
+    }
+
     private fun handleMediaKeyEvent(keyEvent: KeyEvent?): Boolean {
         if (keyEvent?.action == KeyEvent.ACTION_DOWN) {
             when (keyEvent.keyCode) {
@@ -440,24 +409,18 @@ class RadioPlayerService : Service() {
                     @Suppress("DEPRECATION")
                     stopForeground(true)
                 }
-                broadcastStatus("已停止")
+                broadcastStatus("\u5df2\u505c\u6b62")
                 stopSelf()
             }
         }
         return START_STICKY
     }
 
-    /**
-     * VLC 模式：下一台
-     */
     fun playNext() {
         val target = playlistManager.next(force = true)
         target?.let { playChannel(it) }
     }
 
-    /**
-     * VLC 模式：上一台（直播流直接换台，无5秒限制）
-     */
     fun playPrevious() {
         val target = playlistManager.previous(force = true)
         target?.let { playChannel(it) }
@@ -467,86 +430,41 @@ class RadioPlayerService : Service() {
         requestAudioFocus()
         val cleanUrl = RadioRepository.sanitizeUrl(channel.streamUrl)
 
-        val notification = buildNotification("正在连接...")
+        val notification = buildNotification("\u6b63\u5728\u8fde\u63a5...")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
 
-        if (isTvheadendOrTs(cleanUrl)) {
-            Log.d(TAG, "检测到 Tvheadend/TS 流，使用专用原生底层引擎播放: $cleanUrl")
-            playWithNativePlayer(cleanUrl)
-        } else {
-            Log.d(TAG, "使用 ExoPlayer 引擎播放: $cleanUrl")
-            playWithExoPlayer(cleanUrl)
-        }
-    }
-
-    private fun playWithNativePlayer(url: String) {
-        stopAllPlayback()
-        isUsingNativePlayer = true
-
         try {
-            val player = MediaPlayer().apply {
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .build()
-                )
-                val headers = mapOf("User-Agent" to "VLC/3.0.18 (Linux; Android)")
-                setDataSource(applicationContext, Uri.parse(url), headers)
-                setOnPreparedListener { mp ->
-                    mp.start()
-                    updateNotification("正在播放")
-                    broadcastStatus("正在播放")
-                }
-                setOnCompletionListener {
-                    updateNotification("播放结束")
-                    broadcastStatus("播放结束")
-                }
-                setOnErrorListener { _, what, extra ->
-                    Log.e(TAG, "Native MediaPlayer 错误: what=$what, extra=$extra")
-                    isUsingNativePlayer = false
-                    playWithExoPlayer(url)
-                    true
-                }
-                prepareAsync()
+            initLibVLC()
+            val player = vlcPlayer ?: return
+            val vlc = libVLC ?: return
+
+            player.stop()
+
+            val media = Media(vlc, Uri.parse(cleanUrl)).apply {
+                setHWDecoderEnabled(false, false)
+                addOption(":network-caching=1500")
+                addOption(":http-user-agent=VLC/3.0.18 (Linux; Android)")
             }
-            nativePlayer = player
-            updateNotification("正在缓冲(TS)...")
-            broadcastStatus("正在缓冲...")
+
+            player.media = media
+            media.release()
+            player.play()
+
+            updateNotification("\u6b63\u5728\u8fde\u63a5...")
+            broadcastStatus("\u6b63\u5728\u8fde\u63a5...")
+            updatePlaybackState(PlaybackStateCompat.STATE_BUFFERING)
         } catch (e: Exception) {
-            Log.e(TAG, "Native MediaPlayer 启动异常", e)
-            playWithExoPlayer(url)
+            Log.e(TAG, "LibVLC \u64ad\u653e\u542f\u52a8\u5f02\u5e38", e)
+            broadcastStatus("\u8fde\u63a5\u5931\u8d25")
         }
-    }
-
-    private fun playWithExoPlayer(url: String) {
-        stopAllPlayback()
-        isUsingNativePlayer = false
-
-        val mediaItemBuilder = MediaItem.Builder().setUri(url)
-        if (url.contains(".m3u8", ignoreCase = true)) {
-            mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-        } else if (isTvheadendOrTs(url)) {
-            mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP2T)
-        }
-
-        exoPlayer.setMediaItem(mediaItemBuilder.build())
-        exoPlayer.prepare()
-        exoPlayer.play()
-        updateNotification("正在连接...")
-        broadcastStatus("正在连接...")
     }
 
     fun isCurrentlyPlaying(): Boolean {
-        return if (isUsingNativePlayer) {
-            nativePlayer?.isPlaying == true
-        } else {
-            exoPlayer.isPlaying
-        }
+        return vlcPlayer?.isPlaying == true
     }
 
     fun togglePlayback() {
@@ -554,42 +472,28 @@ class RadioPlayerService : Service() {
     }
 
     fun pausePlayback() {
-        if (isUsingNativePlayer) {
-            nativePlayer?.pause()
-        } else {
-            exoPlayer.pause()
-        }
-        updateNotification("已暂停")
-        broadcastStatus("已暂停")
+        vlcPlayer?.pause()
+        updateNotification("\u5df2\u6682\u505c")
+        broadcastStatus("\u5df2\u6682\u505c")
+        updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
     }
 
     fun resumePlayback() {
         requestAudioFocus()
-        if (isUsingNativePlayer) {
-            nativePlayer?.start()
-        } else {
-            exoPlayer.play()
-        }
-        updateNotification("正在播放")
-        broadcastStatus("正在播放")
+        vlcPlayer?.play()
+        updateNotification("\u6b63\u5728\u64ad\u653e")
+        broadcastStatus("\u6b63\u5728\u64ad\u653e")
+        updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
     }
 
     fun stopAllPlayback() {
         abandonAudioFocus()
         try {
-            if (exoPlayer.isPlaying || exoPlayer.playbackState != Player.STATE_IDLE) {
-                exoPlayer.stop()
-            }
+            vlcPlayer?.stop()
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        try {
-            nativePlayer?.stop()
-            nativePlayer?.release()
-            nativePlayer = null
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
     }
 
     private fun broadcastStatus(status: String) {
@@ -608,8 +512,8 @@ class RadioPlayerService : Service() {
 
     private fun buildNotification(statusText: String): Notification {
         val currentChannel = playlistManager.getCurrentChannel()
-        val channelName = currentChannel?.name ?: "畅听电台"
-        val freq = currentChannel?.frequency ?: "网络广播"
+        val channelName = currentChannel?.name ?: "\u7545\u542c\u7535\u53f0"
+        val freq = currentChannel?.frequency ?: "\u7f51\u7edc\u5e7f\u64ad"
 
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -637,16 +541,21 @@ class RadioPlayerService : Service() {
         val isPlaying = isCurrentlyPlaying()
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(channelName)
-            .setContentText("$freq · $statusText")
+            .setContentText("$freq \u00b7 $statusText")
             .setSmallIcon(R.drawable.ic_radio)
             .setContentIntent(pOpenApp)
-            .addAction(android.R.drawable.ic_media_previous, "上一台", pPrev)
+            .addAction(android.R.drawable.ic_media_previous, "\u4e0a\u4e00\u53f0", pPrev)
             .addAction(
                 if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
-                if (isPlaying) "暂停" else "播放",
+                if (isPlaying) "\u6682\u505c" else "\u64ad\u653e",
                 pToggle
             )
-            .addAction(android.R.drawable.ic_media_next, "下一台", pNext)
+            .addAction(android.R.drawable.ic_media_next, "\u4e0b\u4e00\u53f0", pNext)
+            .setStyle(
+                androidx.media.app.NotificationCompat.MediaStyle()
+                    .setMediaSession(mediaSession.sessionToken)
+                    .setShowActionsInCompactView(0, 1, 2)
+            )
             .setOngoing(isPlaying)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
@@ -661,10 +570,10 @@ class RadioPlayerService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "电台后台播放",
+                "\u7535\u53f0\u540e\u53f0\u64ad\u653e",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "展示当前播放的广播节目并提供播放控制"
+                description = "\u5c55\u793a\u5f53\u524d\u64ad\u653e\u7684\u5e7f\u64ad\u8282\u76ee\u5e76\u63d0\u4f9b\u64ad\u653e\u63a7\u5236"
             }
             val manager = getSystemService(NotificationManager::class.java)
             manager?.createNotificationChannel(channel)
@@ -678,10 +587,18 @@ class RadioPlayerService : Service() {
             e.printStackTrace()
         }
         stopAllPlayback()
-        mediaSession?.run {
-            exoPlayer.release()
-            release()
-            mediaSession = null
+        try {
+            vlcPlayer?.release()
+            vlcPlayer = null
+            libVLC?.release()
+            libVLC = null
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        try {
+            mediaSession.release()
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
         super.onDestroy()
     }
