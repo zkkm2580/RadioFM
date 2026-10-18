@@ -38,7 +38,7 @@ import io.microshow.fm.model.RadioChannel
 import io.microshow.fm.ui.MainActivity
 
 /**
- * 畅听FM核心播放服务
+ * FM网络收音机核心播放服务
  * 集成参考 VLC 架构的播放列表管理器（PlaylistManager）与车机媒体会话
  */
 class RadioPlayerService : Service() {
@@ -608,7 +608,7 @@ class RadioPlayerService : Service() {
 
     private fun buildNotification(statusText: String): Notification {
         val currentChannel = playlistManager.getCurrentChannel()
-        val channelName = currentChannel?.name ?: "畅听电台"
+        val channelName = currentChannel?.name ?: "网络收音机"
         val freq = currentChannel?.frequency ?: "网络广播"
 
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
