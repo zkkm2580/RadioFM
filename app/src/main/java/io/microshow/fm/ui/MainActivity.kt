@@ -20,7 +20,7 @@ import io.microshow.fm.model.RadioChannel
 import io.microshow.fm.player.RadioPlayerService
 
 /**
- * 畅听FM 主界面
+ * FM网络收音机 主界面
  * 参考 VLC (VideoPlayerActivity + PlayerKeyListenerDelegate) 架构进行车机按键分发与换台
  */
 class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListener {
@@ -54,7 +54,7 @@ class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListe
                 activeChannel = channel
                 tvCurrentChannel.text = "${channel.name} · $status"
             } else {
-                tvCurrentChannel.text = "畅听FM · $status"
+                tvCurrentChannel.text = "FM网络收音机 · $status"
             }
 
             btnToggle.text = if (isPlaying) "暂停" else "播放"
