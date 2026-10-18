@@ -35,7 +35,7 @@
 
 您可以直接前往仓库的 [Releases 页面](https://github.com/zkkm2580/RadioFM/releases) 下载最新编译好的 APK 安装包：
 
-- **最新稳定版下载**：[RadioFM-Latest.apk](https://github.com/zkkm2580/RadioFM/releases/latest)（大小仅 ~8.9 MB）
+- **最新稳定版下载**：[FM网络收音机.apk](https://github.com/zkkm2580/RadioFM/releases/latest)（大小仅 ~8.9 MB）
 
 ---
 
