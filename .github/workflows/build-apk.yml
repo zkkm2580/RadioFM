@@ -36,7 +36,9 @@ jobs:
         TAG_NAME="v1.1.0-$(date +'%Y%m%d%H%M')"
         echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
         mkdir -p release_dist
-        cp app/build/outputs/apk/debug/*.apk release_dist/FM网络收音机.apk
+        # 同时保留中文名与 URL 安全名称，确保任意浏览器下载均不乱码
+        cp app/build/outputs/apk/debug/*.apk "release_dist/FM网络收音机.apk"
+        cp app/build/outputs/apk/debug/*.apk "release_dist/RadioFM-Latest.apk"
 
     - name: 上传 APK 安装包至 Artifacts
       uses: actions/upload-artifact@v4
@@ -66,6 +68,8 @@ jobs:
           
           - 🌙 **深色/夜间模式自动跟随系统**：
             - 新增 DayNight 双套色彩与主题系统，汽车开大灯/夜间时界面自动切换为深色护眼模式。
-        files: release_dist/FM网络收音机.apk
+        files: |
+          release_dist/FM网络收音机.apk
+          release_dist/RadioFM-Latest.apk
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
