@@ -36,22 +36,22 @@ jobs:
         TAG_NAME="v1.1.0-$(date +'%Y%m%d%H%M')"
         echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
         mkdir -p release_dist
-        cp app/build/outputs/apk/debug/*.apk release_dist/RadioFM-Latest.apk
+        cp app/build/outputs/apk/debug/*.apk release_dist/FM网络收音机.apk
 
     - name: 上传 APK 安装包至 Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: 畅听FM-Debug-APK
-        path: release_dist/RadioFM-Latest.apk
+        name: FM网络收音机-Debug-APK
+        path: release_dist/FM网络收音机.apk
         retention-days: 7
 
     - name: 发布 APK 到 GitHub Releases
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.release_apk.outputs.tag_name }}
-        name: 畅听FM v1.1.0 (${{ steps.release_apk.outputs.tag_name }})
+        name: FM网络收音机 v1.1.0 (${{ steps.release_apk.outputs.tag_name }})
         body: |
-          ### 畅听FM (RadioFM) 更新说明
+          ### FM网络收音机 (RadioFM) 更新说明
           
           - 🚗 **全面支持汽车方向盘换台与车载中控控制**：
             - 深度集成经典与现代 Android `MediaSession` 车载媒体会话协议；
@@ -66,6 +66,6 @@ jobs:
           
           - 🌙 **深色/夜间模式自动跟随系统**：
             - 新增 DayNight 双套色彩与主题系统，汽车开大灯/夜间时界面自动切换为深色护眼模式。
-        files: release_dist/RadioFM-Latest.apk
+        files: release_dist/FM网络收音机.apk
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
