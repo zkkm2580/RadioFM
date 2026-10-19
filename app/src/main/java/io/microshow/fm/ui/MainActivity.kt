@@ -255,6 +255,7 @@ class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListe
     }
 
     override fun onDestroy() {
+        weatherLocationHelper.stop()
         unregisterReceiver(statusReceiver)
         super.onDestroy()
     }
