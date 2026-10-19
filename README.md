@@ -47,3 +47,4 @@
   - `androidx.media3:media3-session` (车载媒体协议)
   - `androidx.appcompat` (DayNight 夜间模式支持)
   - `androidx.recyclerview` (电台列表高效渲染)
+QQ群:887679093
