@@ -30,31 +30,19 @@
             android:textColor="@color/header_subtitle_text"
             android:textSize="15sp" />
 
-        <LinearLayout
+        <!-- 实时时钟：原“播放 / 暂停 / 停止”按钮位置 -->
+        <TextView
+            android:id="@+id/tv_clock"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="16dp">
-
-            <Button
-                android:id="@+id/btn_toggle_play"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:backgroundTint="@color/button_toggle_bg"
-                android:textColor="@color/button_toggle_text"
-                android:text="播放 / 暂停" />
-
-            <Button
-                android:id="@+id/btn_stop"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="12dp"
-                android:backgroundTint="#EF5350"
-                android:textColor="#FFFFFF"
-                android:text="停止" />
-        </LinearLayout>
+            android:layout_marginTop="16dp"
+            android:fontFamily="monospace"
+            android:gravity="center"
+            android:letterSpacing="0.08"
+            android:text="00:00:00"
+            android:textColor="@color/header_title_text"
+            android:textSize="42sp"
+            android:textStyle="bold" />
     </LinearLayout>
 
     <!-- 列表标题 -->

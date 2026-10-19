@@ -6,8 +6,9 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.KeyEvent
-import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -18,6 +19,9 @@ import io.microshow.fm.R
 import io.microshow.fm.data.RadioRepository
 import io.microshow.fm.model.RadioChannel
 import io.microshow.fm.player.RadioPlayerService
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * FM网络收音机 主界面
@@ -26,8 +30,7 @@ import io.microshow.fm.player.RadioPlayerService
 class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListener {
 
     private lateinit var tvCurrentChannel: TextView
-    private lateinit var btnToggle: Button
-    private lateinit var btnStop: Button
+    private lateinit var tvClock: TextView
     private lateinit var rvChannels: RecyclerView
     private lateinit var channelAdapter: ChannelAdapter
 
@@ -38,11 +41,21 @@ class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListe
     private lateinit var playerKeyListenerDelegate: PlayerKeyListenerDelegate
     private var switchToast: Toast? = null
 
+    // 实时时钟（原“播放 / 暂停 / 停止”按钮位置）
+    private val clockHandler = Handler(Looper.getMainLooper())
+    private val clockFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    private val clockRunnable = object : Runnable {
+        override fun run() {
+            tvClock.text = clockFormat.format(Date())
+            // 对齐到下一秒，避免秒数漂移
+            clockHandler.postDelayed(this, 1000L - (System.currentTimeMillis() % 1000L))
+        }
+    }
+
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val status = intent?.getStringExtra(RadioPlayerService.EXTRA_STATUS) ?: return
             val index = intent.getIntExtra(RadioPlayerService.EXTRA_CURRENT_INDEX, -1)
-            val isPlaying = intent.getBooleanExtra(RadioPlayerService.EXTRA_IS_PLAYING, false)
             val channel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 intent.getSerializableExtra(RadioPlayerService.EXTRA_CHANNEL, RadioChannel::class.java)
             } else {
@@ -56,8 +69,6 @@ class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListe
             } else {
                 tvCurrentChannel.text = "FM网络收音机 · $status"
             }
-
-            btnToggle.text = if (isPlaying) "暂停" else "播放"
 
             if (index >= 0) {
                 channelAdapter.setSelectedIndex(index)
@@ -75,8 +86,7 @@ class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListe
         playerKeyListenerDelegate = PlayerKeyListenerDelegate(this)
 
         tvCurrentChannel = findViewById(R.id.tv_current_channel)
-        btnToggle = findViewById(R.id.btn_toggle_play)
-        btnStop = findViewById(R.id.btn_stop)
+        tvClock = findViewById(R.id.tv_clock)
         rvChannels = findViewById(R.id.rv_channels)
 
         // 1. 初始化预设电台
@@ -98,14 +108,16 @@ class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListe
             }
         }
 
-        btnToggle.setOnClickListener {
+        // 原“播放 / 暂停”“停止”按钮已替换为实时时钟；
+        // 保留点按 = 播放/暂停、长按 = 停止，避免失去触屏控制入口
+        tvClock.setOnClickListener {
             RadioPlayerService.togglePause(this)
         }
 
-        btnStop.setOnClickListener {
+        tvClock.setOnLongClickListener {
             RadioPlayerService.stop(this)
             tvCurrentChannel.text = "已停止播放"
-            btnToggle.text = "播放"
+            true
         }
 
         val filter = IntentFilter(RadioPlayerService.ACTION_STATUS_CHANGE)
@@ -120,6 +132,21 @@ class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListe
         super.onResume()
         // 回到前台主动同步一次 Service 的最新播放信息
         RadioPlayerService.requestStatus(this)
+        startClock()
+    }
+
+    override fun onPause() {
+        stopClock()
+        super.onPause()
+    }
+
+    private fun startClock() {
+        clockHandler.removeCallbacks(clockRunnable)
+        clockRunnable.run()
+    }
+
+    private fun stopClock() {
+        clockHandler.removeCallbacks(clockRunnable)
     }
 
     // =========================================================================
