@@ -38,10 +38,10 @@
             android:layout_marginTop="12dp"
             android:fontFamily="monospace"
             android:gravity="center"
-            android:letterSpacing="0.08"
+            android:letterSpacing="0.04"
             android:text="00:00:00"
             android:textColor="@color/header_title_text"
-            android:textSize="42sp"
+            android:textSize="36sp"
             android:textStyle="bold" />
 
         <!-- 实时定位县市与天气栏 -->
@@ -65,7 +65,7 @@
                 android:ellipsize="end"
                 android:text="正在定位..."
                 android:textColor="@color/header_subtitle_text"
-                android:textSize="12sp" />
+                android:textSize="18sp" />
 
             <!-- 右侧：实时天气与温度 -->
             <TextView
@@ -77,7 +77,7 @@
                 android:singleLine="true"
                 android:text="天气获取中..."
                 android:textColor="@color/header_subtitle_text"
-                android:textSize="12sp" />
+                android:textSize="18sp" />
         </LinearLayout>
     </LinearLayout>
 
