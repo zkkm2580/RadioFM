@@ -43,6 +43,42 @@
             android:textColor="@color/header_title_text"
             android:textSize="42sp"
             android:textStyle="bold" />
+
+        <!-- 实时定位县市与天气栏 -->
+        <LinearLayout
+            android:id="@+id/layout_location_weather"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="4dp">
+
+            <!-- 左侧：GPS或网络定位县市 -->
+            <TextView
+                android:id="@+id/tv_location"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="start|center_vertical"
+                android:singleLine="true"
+                android:ellipsize="end"
+                android:text="正在定位..."
+                android:textColor="@color/header_subtitle_text"
+                android:textSize="14sp" />
+
+            <!-- 右侧：实时天气与温度 -->
+            <TextView
+                android:id="@+id/tv_weather"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:gravity="end|center_vertical"
+                android:singleLine="true"
+                android:text="天气获取中..."
+                android:textColor="@color/header_subtitle_text"
+                android:textSize="14sp" />
+        </LinearLayout>
     </LinearLayout>
 
     <!-- 列表标题 -->

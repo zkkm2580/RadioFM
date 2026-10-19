@@ -1,9 +1,11 @@
 package io.microshow.fm.ui
 
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -11,14 +13,17 @@ import android.os.Looper
 import android.view.KeyEvent
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDelegate
+import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import io.microshow.fm.R
 import io.microshow.fm.data.RadioRepository
 import io.microshow.fm.model.RadioChannel
 import io.microshow.fm.player.RadioPlayerService
+import io.microshow.fm.util.WeatherLocationHelper
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -31,11 +36,26 @@ class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListe
 
     private lateinit var tvCurrentChannel: TextView
     private lateinit var tvClock: TextView
+    private lateinit var tvLocation: TextView
+    private lateinit var tvWeather: TextView
     private lateinit var rvChannels: RecyclerView
     private lateinit var channelAdapter: ChannelAdapter
 
     private var activeChannel: RadioChannel? = null
     private var currentChannels: List<RadioChannel> = emptyList()
+
+    // 实时定位与天气辅助类
+    private lateinit var weatherLocationHelper: WeatherLocationHelper
+
+    private val locationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        if (granted) {
+            weatherLocationHelper.refresh(force = true)
+        }
+    }
 
     // VLC 风格的专用按键监听委托
     private lateinit var playerKeyListenerDelegate: PlayerKeyListenerDelegate
@@ -87,9 +107,29 @@ class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListe
 
         tvCurrentChannel = findViewById(R.id.tv_current_channel)
         tvClock = findViewById(R.id.tv_clock)
+        tvLocation = findViewById(R.id.tv_location)
+        tvWeather = findViewById(R.id.tv_weather)
         rvChannels = findViewById(R.id.rv_channels)
 
-        // 1. 初始化预设电台
+        // 1. 初始化定位与天气辅助类
+        weatherLocationHelper = WeatherLocationHelper(this) { loc, weather ->
+            tvLocation.text = loc
+            tvWeather.text = weather
+        }
+
+        // 请求定位权限（若尚未授权）
+        val hasFine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val hasCoarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!hasFine && !hasCoarse) {
+            locationPermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        }
+
+        // 2. 初始化预设电台
         currentChannels = RadioRepository.getPresetChannels()
         channelAdapter = ChannelAdapter(currentChannels) { channel, index ->
             activeChannel = channel
@@ -99,7 +139,7 @@ class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListe
         rvChannels.layoutManager = LinearLayoutManager(this)
         rvChannels.adapter = channelAdapter
 
-        // 2. 异步拉取最新在线电台源并同步至播放服务
+        // 3. 异步拉取最新在线电台源并同步至播放服务
         RadioRepository.fetchOnlineChannels { onlineChannels ->
             runOnUiThread {
                 currentChannels = onlineChannels
@@ -133,6 +173,7 @@ class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListe
         // 回到前台主动同步一次 Service 的最新播放信息
         RadioPlayerService.requestStatus(this)
         startClock()
+        weatherLocationHelper.refresh()
     }
 
     override fun onPause() {
