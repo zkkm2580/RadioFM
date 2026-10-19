@@ -53,7 +53,7 @@ class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListe
         val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
                 permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
         if (granted) {
-            weatherLocationHelper.refresh(force = true)
+            weatherLocationHelper.start()
         }
     }
 
@@ -173,10 +173,11 @@ class MainActivity : AppCompatActivity(), PlayerKeyListenerDelegate.KeycodeListe
         // 回到前台主动同步一次 Service 的最新播放信息
         RadioPlayerService.requestStatus(this)
         startClock()
-        weatherLocationHelper.refresh()
+        weatherLocationHelper.start()
     }
 
     override fun onPause() {
+        weatherLocationHelper.pause()
         stopClock()
         super.onPause()
     }
