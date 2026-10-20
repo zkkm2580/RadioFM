@@ -13,10 +13,11 @@ import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
@@ -36,27 +37,38 @@ import io.microshow.fm.R
 import io.microshow.fm.data.RadioRepository
 import io.microshow.fm.model.RadioChannel
 import io.microshow.fm.ui.MainActivity
+import org.videolan.libvlc.LibVLC
+import org.videolan.libvlc.Media
 
 /**
  * FM网络收音机核心播放服务
- * 集成参考 VLC 架构的播放列表管理器（PlaylistManager）与车机媒体会话
+ * 双引擎架构：
+ * 1. VideoLAN LibVLC 原生底层引擎：专用于 Tvheadend MPEG-TS 纯音频广播流（支持 TS 解封装与软硬解自动容灾）；
+ * 2. AndroidX Media3 (ExoPlayer) 引擎：用于常规网络电台、HLS (.m3u8) 与标准 AAC/MP3 流。
+ * 完善的车载方向盘切台、MediaSession 协议与音频焦点（AudioFocus）管理。
  */
 class RadioPlayerService : Service() {
 
     private lateinit var exoPlayer: ExoPlayer
-    private var nativePlayer: MediaPlayer? = null
-    private var isUsingNativePlayer = false
+
+    // VideoLAN LibVLC 原生播放核心（专用于 Tvheadend TS 流）
+    private var libVLC: LibVLC? = null
+    private var vlcMediaPlayer: org.videolan.libvlc.MediaPlayer? = null
+    private var isUsingVlcPlayer = false
+    private var hasTriedVlcSoftwareFallback = false
 
     private var mediaSession: MediaSession? = null
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
 
-    // 引入 VLC 架构的 PlaylistManager 统一管理频道列表与索引切换
     private val playlistManager = PlaylistManager()
     private var lastStatusText: String = "就绪"
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     companion object {
         private const val TAG = "RadioPlayerService"
+        const val VLC_USER_AGENT = "VLC/3.0.18 (Linux; Android)"
 
         const val ACTION_PLAY = "io.microshow.fm.ACTION_PLAY"
         const val ACTION_TOGGLE_PAUSE = "io.microshow.fm.ACTION_TOGGLE_PAUSE"
@@ -136,7 +148,7 @@ class RadioPlayerService : Service() {
     }
 
     /**
-     * 监听各种车机（掌讯、方易通、鼎微等）私有或系统媒体按键广播
+     * 监听各种车载（掌讯、方易通、诺威等）私有或系统媒体按键广播
      */
     private val carMediaCommandReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -167,6 +179,7 @@ class RadioPlayerService : Service() {
         super.onCreate()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         initExoPlayer()
+        initLibVlc()
         createNotificationChannel()
         registerCarMediaReceiver()
     }
@@ -186,16 +199,71 @@ class RadioPlayerService : Service() {
         }
     }
 
+    /**
+     * 识别 Tvheadend 特征流与 MPEG-TS 广播流
+     */
     private fun isTvheadendOrTs(url: String): Boolean {
         return url.contains(":8168", ignoreCase = true) ||
-               url.contains("/stream/", ignoreCase = true) ||
-               url.contains(".ts", ignoreCase = true) ||
-               url.contains("audio/mp2t", ignoreCase = true)
+                url.contains(":9981", ignoreCase = true) ||
+                url.contains("/stream/", ignoreCase = true) ||
+                url.contains("profile=pass", ignoreCase = true) ||
+                url.contains(".ts", ignoreCase = true) ||
+                url.contains("audio/mp2t", ignoreCase = true)
+    }
+
+    /**
+     * 初始化 VideoLAN LibVLC 原生解码引擎
+     */
+    private fun initLibVlc() {
+        try {
+            val options = arrayListOf(
+                "--http-user-agent=$VLC_USER_AGENT",
+                "--network-caching=2500",
+                "--live-caching=2000",
+                "--file-caching=2000",
+                "--sout-mux-caching=2000",
+                "--codec=mediacodec_ndk,mediacodec_jni,all",
+                "--http-reconnect",
+                "--ts-trust-pcr",
+                "--no-sub-autodetect-file",
+                "-vvv"
+            )
+            libVLC = LibVLC(this, options)
+            vlcMediaPlayer = org.videolan.libvlc.MediaPlayer(libVLC).apply {
+                setEventListener { event ->
+                    if (!isUsingVlcPlayer) return@setEventListener
+                    when (event.type) {
+                        org.videolan.libvlc.MediaPlayer.Event.Buffering -> {
+                            val status = "正在缓冲(TS)..."
+                            updateNotification(status)
+                            broadcastStatus(status)
+                        }
+                        org.videolan.libvlc.MediaPlayer.Event.Playing -> {
+                            val status = "正在播放"
+                            updateNotification(status)
+                            broadcastStatus(status)
+                        }
+                        org.videolan.libvlc.MediaPlayer.Event.EncounteredError -> {
+                            Log.w(TAG, "LibVLC 播放 Tvheadend 异常，准备容灾降级软解重试")
+                            handleVlcPlaybackError()
+                        }
+                        org.videolan.libvlc.MediaPlayer.Event.EndReached -> {
+                            playlistManager.getCurrentChannel()?.let {
+                                val cleanUrl = RadioRepository.sanitizeUrl(it.streamUrl)
+                                playWithLibVlc(cleanUrl, useSoftwareDecoder = false)
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "初始化 LibVLC 异常: ${e.message}", e)
+        }
     }
 
     private fun initExoPlayer() {
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("VLC/3.0.18 (Linux; Android)")
+            .setUserAgent(VLC_USER_AGENT)
             .setConnectTimeoutMs(20000)
             .setReadTimeoutMs(20000)
             .setAllowCrossProtocolRedirects(true)
@@ -203,7 +271,7 @@ class RadioPlayerService : Service() {
         val extractorsFactory = DefaultExtractorsFactory()
             .setTsExtractorFlags(
                 DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
-                DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS
+                        DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS
             )
             .setTsExtractorMode(TsExtractor.MODE_MULTI_PMT)
 
@@ -216,7 +284,7 @@ class RadioPlayerService : Service() {
 
         exoPlayer.addListener(object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
-                if (isUsingNativePlayer) return
+                if (isUsingVlcPlayer) return
                 val status = when (state) {
                     Player.STATE_BUFFERING -> "正在缓冲..."
                     Player.STATE_READY -> if (exoPlayer.isPlaying) "正在播放" else "已暂停"
@@ -228,7 +296,7 @@ class RadioPlayerService : Service() {
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (isUsingNativePlayer) return
+                if (isUsingVlcPlayer) return
                 val status = if (isPlaying) "正在播放" else "已暂停"
                 updateNotification(status)
                 broadcastStatus(status)
@@ -238,9 +306,10 @@ class RadioPlayerService : Service() {
                 Log.e(TAG, "ExoPlayer 播放错误: ${error.errorCodeName}", error)
                 playlistManager.getCurrentChannel()?.let { ch ->
                     val cleanUrl = RadioRepository.sanitizeUrl(ch.streamUrl)
-                    if (!isUsingNativePlayer) {
-                        Log.d(TAG, "自动切换至 Native MediaPlayer 备用引擎...")
-                        playWithNativePlayer(cleanUrl)
+                    if (!isUsingVlcPlayer) {
+                        Log.d(TAG, "自动故障转移切换至 LibVLC 原生底层引擎播放...")
+                        hasTriedVlcSoftwareFallback = false
+                        playWithLibVlc(cleanUrl, useSoftwareDecoder = false)
                         return
                     }
                 }
@@ -447,17 +516,11 @@ class RadioPlayerService : Service() {
         return START_STICKY
     }
 
-    /**
-     * VLC 模式：下一台
-     */
     fun playNext() {
         val target = playlistManager.next(force = true)
         target?.let { playChannel(it) }
     }
 
-    /**
-     * VLC 模式：上一台（直播流直接换台，无5秒限制）
-     */
     fun playPrevious() {
         val target = playlistManager.previous(force = true)
         target?.let { playChannel(it) }
@@ -475,63 +538,81 @@ class RadioPlayerService : Service() {
         }
 
         if (isTvheadendOrTs(cleanUrl)) {
-            Log.d(TAG, "检测到 Tvheadend/TS 流，使用专用原生底层引擎播放: $cleanUrl")
-            playWithNativePlayer(cleanUrl)
+            Log.d(TAG, "检测到 Tvheadend/TS 流，使用 VideoLAN LibVLC 原生底层核心播放: $cleanUrl")
+            hasTriedVlcSoftwareFallback = false
+            playWithLibVlc(cleanUrl, useSoftwareDecoder = false)
         } else {
             Log.d(TAG, "使用 ExoPlayer 引擎播放: $cleanUrl")
             playWithExoPlayer(cleanUrl)
         }
     }
 
-    private fun playWithNativePlayer(url: String) {
+    /**
+     * 使用 VideoLAN LibVLC 原生核心播放 Tvheadend MPEG-TS 流
+     */
+    private fun playWithLibVlc(url: String, useSoftwareDecoder: Boolean = false) {
         stopAllPlayback()
-        isUsingNativePlayer = true
+        isUsingVlcPlayer = true
+
+        val vlc = libVLC ?: run {
+            initLibVlc()
+            libVLC
+        } ?: return
+
+        val player = vlcMediaPlayer ?: return
 
         try {
-            val player = MediaPlayer().apply {
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .build()
-                )
-                val headers = mapOf("User-Agent" to "VLC/3.0.18 (Linux; Android)")
-                setDataSource(applicationContext, Uri.parse(url), headers)
-                setOnPreparedListener { mp ->
-                    mp.start()
-                    updateNotification("正在播放")
-                    broadcastStatus("正在播放")
-                }
-                setOnCompletionListener {
-                    updateNotification("播放结束")
-                    broadcastStatus("播放结束")
-                }
-                setOnErrorListener { _, what, extra ->
-                    Log.e(TAG, "Native MediaPlayer 错误: what=$what, extra=$extra")
-                    isUsingNativePlayer = false
-                    playWithExoPlayer(url)
-                    true
-                }
-                prepareAsync()
+            player.stop()
+            val media = Media(vlc, Uri.parse(url)).apply {
+                setHWDecoderEnabled(!useSoftwareDecoder, false)
+                addOption(":http-user-agent=$VLC_USER_AGENT")
+                addOption(":network-caching=2500")
+                addOption(":http-reconnect=true")
+                addOption(":demux=ts")
+                addOption(":ts-extra-pmt=1")
+                addOption(":ts-trust-pcr")
             }
-            nativePlayer = player
-            updateNotification("正在缓冲(TS)...")
-            broadcastStatus("正在缓冲...")
+            player.media = media
+            media.release()
+            player.play()
+
+            val status = if (useSoftwareDecoder) "正在连接(TS软解)..." else "正在连接(TS)..."
+            updateNotification(status)
+            broadcastStatus(status)
         } catch (e: Exception) {
-            Log.e(TAG, "Native MediaPlayer 启动异常", e)
-            playWithExoPlayer(url)
+            Log.e(TAG, "LibVLC 播放启动异常: ${e.message}")
+            handleVlcPlaybackError()
+        }
+    }
+
+    /**
+     * Tvheadend 播放异常自愈容灾：当硬解对特定广播 MP2 音频流不支持时，自动切换 LibVLC 软解
+     */
+    private fun handleVlcPlaybackError() {
+        val channel = playlistManager.getCurrentChannel() ?: return
+        val cleanUrl = RadioRepository.sanitizeUrl(channel.streamUrl)
+        if (!hasTriedVlcSoftwareFallback) {
+            hasTriedVlcSoftwareFallback = true
+            Log.d(TAG, "Tvheadend 硬解受限，自动切换至 LibVLC 原生软解模式...")
+            playWithLibVlc(cleanUrl, useSoftwareDecoder = true)
+        } else {
+            val status = "正在重连(TS)..."
+            updateNotification(status)
+            broadcastStatus(status)
+            mainHandler.postDelayed({
+                hasTriedVlcSoftwareFallback = false
+                playWithLibVlc(cleanUrl, useSoftwareDecoder = false)
+            }, 2500L)
         }
     }
 
     private fun playWithExoPlayer(url: String) {
         stopAllPlayback()
-        isUsingNativePlayer = false
+        isUsingVlcPlayer = false
 
         val mediaItemBuilder = MediaItem.Builder().setUri(url)
         if (url.contains(".m3u8", ignoreCase = true)) {
             mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-        } else if (isTvheadendOrTs(url)) {
-            mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP2T)
         }
 
         exoPlayer.setMediaItem(mediaItemBuilder.build())
@@ -542,8 +623,8 @@ class RadioPlayerService : Service() {
     }
 
     fun isCurrentlyPlaying(): Boolean {
-        return if (isUsingNativePlayer) {
-            nativePlayer?.isPlaying == true
+        return if (isUsingVlcPlayer) {
+            vlcMediaPlayer?.isPlaying == true
         } else {
             exoPlayer.isPlaying
         }
@@ -554,8 +635,8 @@ class RadioPlayerService : Service() {
     }
 
     fun pausePlayback() {
-        if (isUsingNativePlayer) {
-            nativePlayer?.pause()
+        if (isUsingVlcPlayer) {
+            vlcMediaPlayer?.pause()
         } else {
             exoPlayer.pause()
         }
@@ -564,14 +645,18 @@ class RadioPlayerService : Service() {
     }
 
     fun resumePlayback() {
-        requestAudioFocus()
-        if (isUsingNativePlayer) {
-            nativePlayer?.start()
+        requestFocus()
+        if (isUsingVlcPlayer) {
+            vlcMediaPlayer?.play()
         } else {
             exoPlayer.play()
         }
         updateNotification("正在播放")
         broadcastStatus("正在播放")
+    }
+
+    private fun requestFocus() {
+        requestAudioFocus()
     }
 
     fun stopAllPlayback() {
@@ -584,9 +669,7 @@ class RadioPlayerService : Service() {
             e.printStackTrace()
         }
         try {
-            nativePlayer?.stop()
-            nativePlayer?.release()
-            nativePlayer = null
+            vlcMediaPlayer?.stop()
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -678,6 +761,11 @@ class RadioPlayerService : Service() {
             e.printStackTrace()
         }
         stopAllPlayback()
+        vlcMediaPlayer?.release()
+        libVLC?.release()
+        vlcMediaPlayer = null
+        libVLC = null
+
         mediaSession?.run {
             exoPlayer.release()
             release()

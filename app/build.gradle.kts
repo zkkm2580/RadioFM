@@ -11,9 +11,13 @@ android {
         applicationId = "io.nbhg.fm"
         minSdk = 21
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a"))
+        }
     }
 
     buildTypes {
@@ -52,4 +56,7 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-rtsp:1.2.1")
     implementation("androidx.media3:media3-ui:1.2.1")
     implementation("androidx.media3:media3-session:1.2.1")
+
+    // VideoLAN LibVLC 官方底层核心引擎 (用于 Tvheadend MPEG-TS 广播流的高可靠解码与软硬解容灾)
+    implementation("org.videolan.android:libvlc-all:3.6.5")
 }
