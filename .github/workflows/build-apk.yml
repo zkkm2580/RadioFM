@@ -33,7 +33,7 @@ jobs:
     - name: 整理发布 APK 文件
       id: release_apk
       run: |
-        TAG_NAME="v1.2.0-$(date +'%Y%m%d%H%M')"
+        TAG_NAME="v1.2.1-$(date +'%Y%m%d%H%M')"
         echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
         mkdir -p release_dist
         # 同时保留中文名与 URL 安全名称，确保任意浏览器下载均不乱码
@@ -51,7 +51,7 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.release_apk.outputs.tag_name }}
-        name: FM网络收音机 v1.2.0 (${{ steps.release_apk.outputs.tag_name }})
+        name: FM网络收音机 v1.2.1 (${{ steps.release_apk.outputs.tag_name }})
         body: |
           ### FM网络收音机 (RadioFM) 更新说明
           
@@ -59,6 +59,7 @@ jobs:
             - 将 Tvheadend 特征流（8168 端口、`/stream/`、`audio/mp2t`）全面交由 VideoLAN LibVLC 核心引擎解封装与播放；
             - 注入原生 VLC User-Agent 与 `:demux=ts`、`:ts-extra-pmt=1`、`--ts-trust-pcr`，彻底解决 MPEG-TS 时钟同步与丢包卡死问题；
             - 增加软硬解智能容灾：当车载芯片 MediaCodec 硬解对 MP2/MPEG-2 音频不兼容报错时，自动毫秒级回退至 LibVLC 软解，确保 100% 能够出声！
+            - **优化屏显状态实时联动**：精准监听 LibVLC 播放事件与解码推进（TimeChanged），解决播放 Tvheadend 时界面卡在“正在缓冲(TS)”的问题，及时准确实时显示“正常播放(TS)”。
           
           - 🚗 **全面支持汽车方向盘换台与车载中控控制**：
             - 深度集成经典与现代 Android `MediaSession` 车载媒体会话协议；

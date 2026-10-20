@@ -234,14 +234,42 @@ class RadioPlayerService : Service() {
                     if (!isUsingVlcPlayer) return@setEventListener
                     when (event.type) {
                         org.videolan.libvlc.MediaPlayer.Event.Buffering -> {
-                            val status = "正在缓冲(TS)..."
+                            val percent = event.buffering
+                            // 如果已经在正常播放中且缓冲完毕，保持“正常播放(TS)”；仅在未开始播放且缓冲不足时提示缓冲
+                            if (percent < 100.0f && !isPlaying) {
+                                val status = "正在缓冲(TS)..."
+                                updateNotification(status)
+                                broadcastStatus(status)
+                            } else if (isPlaying || percent >= 100.0f) {
+                                val status = "正常播放(TS)"
+                                if (lastStatusText != status) {
+                                    updateNotification(status)
+                                    broadcastStatus(status)
+                                }
+                            }
+                        }
+                        org.videolan.libvlc.MediaPlayer.Event.Playing -> {
+                            val status = "正常播放(TS)"
                             updateNotification(status)
                             broadcastStatus(status)
                         }
-                        org.videolan.libvlc.MediaPlayer.Event.Playing -> {
-                            val status = "正在播放"
+                        org.videolan.libvlc.MediaPlayer.Event.Paused -> {
+                            val status = "已暂停(TS)"
                             updateNotification(status)
                             broadcastStatus(status)
+                        }
+                        org.videolan.libvlc.MediaPlayer.Event.Stopped -> {
+                            val status = "已停止"
+                            updateNotification(status)
+                            broadcastStatus(status)
+                        }
+                        org.videolan.libvlc.MediaPlayer.Event.TimeChanged -> {
+                            // 只要音频在推进，且状态未显示为“正常播放(TS)”，立即纠偏为“正常播放(TS)”
+                            if (isPlaying && lastStatusText != "正常播放(TS)") {
+                                val status = "正常播放(TS)"
+                                updateNotification(status)
+                                broadcastStatus(status)
+                            }
                         }
                         org.videolan.libvlc.MediaPlayer.Event.EncounteredError -> {
                             Log.w(TAG, "LibVLC 播放 Tvheadend 异常，准备容灾降级软解重试")
@@ -498,7 +526,12 @@ class RadioPlayerService : Service() {
             ACTION_TOGGLE_PAUSE -> togglePlayback()
 
             ACTION_REQUEST_STATUS -> {
-                broadcastStatus(lastStatusText)
+                val effectiveStatus = if (isUsingVlcPlayer && vlcMediaPlayer?.isPlaying == true) {
+                    "正常播放(TS)"
+                } else {
+                    lastStatusText
+                }
+                broadcastStatus(effectiveStatus)
             }
 
             ACTION_STOP -> {
@@ -637,22 +670,30 @@ class RadioPlayerService : Service() {
     fun pausePlayback() {
         if (isUsingVlcPlayer) {
             vlcMediaPlayer?.pause()
+            val status = "已暂停(TS)"
+            updateNotification(status)
+            broadcastStatus(status)
         } else {
             exoPlayer.pause()
+            val status = "已暂停"
+            updateNotification(status)
+            broadcastStatus(status)
         }
-        updateNotification("已暂停")
-        broadcastStatus("已暂停")
     }
 
     fun resumePlayback() {
         requestFocus()
         if (isUsingVlcPlayer) {
             vlcMediaPlayer?.play()
+            val status = "正常播放(TS)"
+            updateNotification(status)
+            broadcastStatus(status)
         } else {
             exoPlayer.play()
+            val status = "正在播放"
+            updateNotification(status)
+            broadcastStatus(status)
         }
-        updateNotification("正在播放")
-        broadcastStatus("正在播放")
     }
 
     private fun requestFocus() {
