@@ -11,8 +11,8 @@ android {
         applicationId = "io.nbhg.fm"
         minSdk = 21
         targetSdk = 34
-        versionCode = 6
-        versionName = "1.2.1"
+        versionCode = 7
+        versionName = "1.2.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
@@ -56,5 +56,7 @@ dependencies {
     implementation("androidx.media3:media3-session:1.2.1")
 
     // VideoLAN LibVLC 官方底层核心引擎（唯一播放引擎：网络电台 / HLS / TS 全格式）
-    implementation("org.videolan.android:libvlc-all:3.6.5")
+    // 3.7.1 对应内核 LibVLC 3.0.23 正式版（3.6.5 对应的是 3.0.22-rc1 候选版），
+    // 与官方 VLC 3.7.1 客户端同款；TS/HLS demux 由内核 probe 负责，版本对齐可修复 RC 版缺陷。
+    implementation("org.videolan.android:libvlc-all:3.7.1")
 }
