@@ -227,10 +227,12 @@ class RadioPlayerService : Service() {
      * 调用方一旦用 `--codec` / `--ts-trust-pcr` 这类全局参数替它做决定，
      * 就等于把“多格式通吃”的能力关掉了，只剩单一格式可用。
      *
-     * 历史问题记录：原实现用了 `--codec=mediacodec_ndk,mediacodec_jni,all`。
-     * `all` 并不是有效的解码器模块名，会让 libvlc 的 codec 列表解析落空，
-     * 反而可能让 MediaCodec 硬解不被选中。硬解开关应交给 Media 级的
-     * `setHWDecoderEnabled()`（内部即 `:codec=mediacodec_ndk,mediacodec_jni,none`）。
+     * 反编译官方 VLC 3.7.1（内核 LibVLC 3.0.23）确认的 setHWDecoderEnabled 实现：
+     *   - 关硬解或设备无可用硬解器 → addOption(":codec=all")
+     *   - 有硬解器 → addOption(":file-caching=1500")+":network-caching=1500"
+     *     + ":codec=<Mediacodec 模块名>,all"（伪模块名 all 表示保留全部兜底解码器）
+     * 因此 `all` 是 libvlc 内置的有效伪模块名，并非无效项；官方软解路径就用它。
+     * 硬解开关统一交给 Media 级的 setHWDecoderEnabled()，不在全局拼 --codec 列表。
      */
     private fun initLibVlc() {
         try {
@@ -568,8 +570,8 @@ class RadioPlayerService : Service() {
         try {
             player.stop()
             val media = Media(vlc, Uri.parse(url)).apply {
-                // 硬解开关交给 VLC 自己权衡：内部即设置
-                // :codec=mediacodec_ndk,mediacodec_jni,none 或 :no-hw-dec
+                // 硬解开关交给 VLC 自己权衡（官方 3.0.23 源码）：
+                // 开硬解 → :codec=<Mediacodec模块>,all；关硬解 → :codec=all。
                 setHWDecoderEnabled(!useSoftwareDecoder, false)
                 addOption(":http-user-agent=$VLC_USER_AGENT")
                 addOption(":network-caching=1500")
