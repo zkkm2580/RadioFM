@@ -317,3 +317,497 @@ class RadioPlayerService : Service() {
             Log.e(TAG, "初始化 LibVLC 异常: ${e.message}", e)
         }
     }
+
+    /**
+     * 初始化 MediaSession 车载会话外壳。
+     * ExoPlayer 不加载任何媒体，仅作为 Player 实例承载 MediaSession，
+     * 所有播放指令最终都被 ForwardingPlayer 转发到 LibVLC。
+     */
+    private fun initSessionShellPlayer() {
+        sessionShellPlayer = ExoPlayer.Builder(this)
+            .setHandleAudioBecomingNoisy(true)
+            .build()
+
+        val forwardingPlayer = object : ForwardingPlayer(sessionShellPlayer) {
+            override fun play() {
+                resumePlayback()
+            }
+            override fun pause() {
+                pausePlayback()
+            }
+            override fun isPlaying(): Boolean {
+                return isCurrentlyPlaying()
+            }
+            override fun seekToNext() {
+                playNext()
+            }
+            override fun seekToNextMediaItem() {
+                playNext()
+            }
+            override fun seekToPrevious() {
+                playPrevious()
+            }
+            override fun seekToPreviousMediaItem() {
+                playPrevious()
+            }
+            override fun getAvailableCommands(): Player.Commands {
+                return super.getAvailableCommands().buildUpon()
+                    .add(Player.COMMAND_PLAY_PAUSE)
+                    .add(Player.COMMAND_SEEK_TO_NEXT)
+                    .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                    .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                    .build()
+            }
+            override fun isCommandAvailable(command: Int): Boolean {
+                if (command == Player.COMMAND_PLAY_PAUSE ||
+                    command == Player.COMMAND_SEEK_TO_NEXT ||
+                    command == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM ||
+                    command == Player.COMMAND_SEEK_TO_PREVIOUS ||
+                    command == Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM) {
+                    return true
+                }
+                return super.isCommandAvailable(command)
+            }
+        }
+
+        val sessionCallback = object : MediaSession.Callback {
+            override fun onMediaButtonEvent(
+                session: MediaSession,
+                controllerInfo: MediaSession.ControllerInfo,
+                intent: Intent
+            ): Boolean {
+                val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+                }
+                if (handleMediaKeyEvent(keyEvent)) {
+                    return true
+                }
+                return super.onMediaButtonEvent(session, controllerInfo, intent)
+            }
+        }
+
+        mediaSession = MediaSession.Builder(this, forwardingPlayer)
+            .setCallback(sessionCallback)
+            .build()
+    }
+
+    /**
+     * 处理车载物理键与媒体按键
+     */
+    private fun handleMediaKeyEvent(keyEvent: KeyEvent?): Boolean {
+        if (keyEvent?.action == KeyEvent.ACTION_DOWN) {
+            when (keyEvent.keyCode) {
+                KeyEvent.KEYCODE_CHANNEL_UP,
+                KeyEvent.KEYCODE_MEDIA_NEXT,
+                KeyEvent.KEYCODE_PAGE_DOWN,
+                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                    playNext()
+                    return true
+                }
+
+                KeyEvent.KEYCODE_CHANNEL_DOWN,
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                KeyEvent.KEYCODE_PAGE_UP,
+                KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                    playPrevious()
+                    return true
+                }
+
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                KeyEvent.KEYCODE_MEDIA_PLAY,
+                KeyEvent.KEYCODE_MEDIA_PAUSE,
+                KeyEvent.KEYCODE_HEADSETHOOK -> {
+                    togglePlayback()
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private fun requestAudioFocus(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val playbackAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+            val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(playbackAttributes)
+                .setAcceptsDelayedFocusGain(true)
+                .setOnAudioFocusChangeListener { focusChange ->
+                    when (focusChange) {
+                        AudioManager.AUDIOFOCUS_LOSS -> pausePlayback()
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pausePlayback()
+                        AudioManager.AUDIOFOCUS_GAIN -> resumePlayback()
+                    }
+                }
+                .build()
+            audioFocusRequest = focusRequest
+            audioManager.requestAudioFocus(focusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(
+                { focusChange ->
+                    when (focusChange) {
+                        AudioManager.AUDIOFOCUS_LOSS -> pausePlayback()
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pausePlayback()
+                        AudioManager.AUDIOFOCUS_GAIN -> resumePlayback()
+                    }
+                },
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN
+            ) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        }
+    }
+
+    private fun abandonAudioFocus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.abandonAudioFocus(null)
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.hasExtra(EXTRA_CHANNEL_LIST) == true) {
+            val list = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getSerializableExtra(EXTRA_CHANNEL_LIST, ArrayList::class.java) as? ArrayList<RadioChannel>
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getSerializableExtra(EXTRA_CHANNEL_LIST) as? ArrayList<RadioChannel>
+            }
+            if (!list.isNullOrEmpty()) {
+                playlistManager.setPlaylist(list)
+            }
+        }
+
+        when (intent?.action) {
+            ACTION_PLAY -> {
+                val channel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getSerializableExtra(EXTRA_CHANNEL, RadioChannel::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getSerializableExtra(EXTRA_CHANNEL) as? RadioChannel
+                }
+                channel?.let {
+                    playlistManager.selectChannel(it)
+                    playChannel(it)
+                }
+            }
+
+            ACTION_NEXT -> playNext()
+            ACTION_PREV -> playPrevious()
+            ACTION_TOGGLE_PAUSE -> togglePlayback()
+
+            ACTION_REQUEST_STATUS -> {
+                val effectiveStatus = if (vlcMediaPlayer?.isPlaying == true) {
+                    "正在播放"
+                } else {
+                    lastStatusText
+                }
+                broadcastStatus(effectiveStatus)
+            }
+
+            ACTION_STOP -> {
+                stopAllPlayback()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                } else {
+                    @Suppress("DEPRECATION")
+                    stopForeground(true)
+                }
+                broadcastStatus("已停止")
+                stopSelf()
+            }
+        }
+        return START_STICKY
+    }
+
+    fun playNext() {
+        val target = playlistManager.next(force = true)
+        target?.let { playChannel(it) }
+    }
+
+    fun playPrevious() {
+        val target = playlistManager.previous(force = true)
+        target?.let { playChannel(it) }
+    }
+
+    private fun playChannel(channel: RadioChannel) {
+        val cleanUrl = RadioRepository.sanitizeUrl(channel.streamUrl)
+
+        val notification = buildNotification("正在连接...")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+
+        Log.d(TAG, "使用 VideoLAN LibVLC 播放: $cleanUrl")
+        // 换台即重置解码档位与错误防抖，新一轮从“硬解优先”开始
+        playbackMode = 0
+        lastErrorHandledAt = 0L
+        playWithLibVlc(cleanUrl)
+    }
+
+    /**
+     * 使用 VideoLAN LibVLC 播放任意电台流。
+     *
+     * 三条原则，逐条对齐 VLC 官方 Android 客户端：
+     * 1. **不指定容器格式**（不加 `:demux=`），交给 libvlc 的 demux probe 现场判定，
+     *    这是 TS、HLS、MP3、AAC、OGG 通吃的根本原因；
+     * 2. **解码器列表必须显式带软解兜底**。只写硬解模块时，libvlc 找不到可用解码器
+     *    就直接静音/报错，MP2、AC3、HE-AAC(i)、OGG 这类硬解不支持的编码全部播不出来；
+     * 3. **不手动 stop 再 setMedia**。libvlc 的 stop 是异步的，紧跟其后的 setMedia
+     *    会被丢弃，表现就是“点了没反应、再点一次才出声”。官方同样是直接换 media。
+     *
+     * @param decodeMode 0 = 硬解优先（默认）；1 = 强制软解；2 = 强制软解 + 最低码率 + 短缓冲
+     */
+    private fun playWithLibVlc(url: String, decodeMode: Int = 0) {
+        // 切台与重试都要握住音频焦点。这里刻意不调 stopAllPlayback()，
+        // 那是 ACTION_STOP 的收尾动作，且默认会连带放弃刚申请的焦点。
+        requestAudioFocus()
+
+        if (libVLC == null) initLibVlc()
+        val vlc = libVLC ?: return
+        val player = vlcMediaPlayer ?: return
+
+        try {
+            val buffering = if (decodeMode >= 2) 800 else 1500
+            val media = Media(vlc, Uri.parse(url)).apply {
+                // 顺序：MediaCodec 硬解(NDK/JNI) → libavcodec 软解 → none 交回默认列表。
+                // 注意不能只写硬解模块名：3.x 的 setHWDecoderEnabled 拼出的是 `...all`，
+                // 而 all 并不是有效模块名，等于把软解兜底丢掉了。
+                addOption(
+                    if (decodeMode == 0) {
+                        ":codec=mediacodec_ndk,mediacodec_jni,avcodec,none"
+                    } else {
+                        ":codec=avcodec,none"
+                    }
+                )
+                if (decodeMode > 0) {
+                    // 关掉 avcodec 的硬解通道（VLC 3.0 的选项名是 avcodec-hw），
+                    // 确保真的落到 ffmpeg 软件解码
+                    addOption(":avcodec-hw=none")
+                }
+                addOption(":http-user-agent=$VLC_USER_AGENT")
+                addOption(":network-caching=$buffering")
+                addOption(":live-caching=$buffering")
+                addOption(":http-reconnect")
+                if (decodeMode >= 2) {
+                    // 弱网/长链路时让 HLS 选最低码率的那条流，先保证能出声再谈音质
+                    addOption(":adaptive-logic=lowest")
+                }
+            }
+            player.media = media
+            media.release()
+            player.play()
+
+            val status = when (decodeMode) {
+                0 -> "正在连接..."
+                1 -> "正在连接(软解)..."
+                else -> "正在连接(低码率)..."
+            }
+            updateNotification(status)
+            broadcastStatus(status)
+        } catch (e: Exception) {
+            Log.e(TAG, "LibVLC 播放启动异常: ${e.message}")
+            handleVlcPlaybackError()
+        }
+    }
+
+    /**
+     * 播放异常自愈。
+     *
+     * 思路是“先信 probe，再换解码器”，绝不再去猜容器格式：
+     *   0 档：硬解优先，容器交给 probe（默认）
+     *   1 档：硬解解不动的编码 → 全软解（libavcodec）
+     *   2 档：软解仍失败 → 软解 + 只选最低码率 + 缩短缓冲（弱网友好）
+     *   之后：延时 3 秒回到 0 档，把源端临时故障当作可恢复，而不是判死刑
+     *
+     * 历史教训：旧实现在这里强制 `:demux=ts`。一旦首轮因网络抖动报了错，
+     * 后续两三档就把 HLS / MP3 / AAC 源全部按 TS 解析，必然失败，
+     * 于是所有非 TS 源都表现为“一直重连、怎么点都播不了”。
+     */
+    private fun handleVlcPlaybackError() {
+        // libvlc 在解封装/网络同时失败时可能连续抛多个 EncounteredError，
+        // 若不防抖，档位会被瞬间打满并开始空转。
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastErrorHandledAt < 2500L) return
+        lastErrorHandledAt = now
+
+        val channel = playlistManager.getCurrentChannel() ?: return
+        val cleanUrl = RadioRepository.sanitizeUrl(channel.streamUrl)
+        val nextMode = playbackMode + 1
+
+        if (nextMode > 2) {
+            val status = "该源暂时无法播放，正在重连..."
+            updateNotification(status)
+            broadcastStatus(status)
+            mainHandler.postDelayed({
+                playbackMode = 0
+                playWithLibVlc(cleanUrl, 0)
+            }, 3000L)
+            return
+        }
+
+        playbackMode = nextMode
+        Log.d(TAG, "第 $nextMode 档解码策略重试: $cleanUrl")
+        playWithLibVlc(cleanUrl, nextMode)
+    }
+
+    fun isCurrentlyPlaying(): Boolean {
+        return vlcMediaPlayer?.isPlaying == true
+    }
+
+    fun togglePlayback() {
+        if (isCurrentlyPlaying()) pausePlayback() else resumePlayback()
+    }
+
+    fun pausePlayback() {
+        vlcMediaPlayer?.pause()
+        val status = "已暂停"
+        updateNotification(status)
+        broadcastStatus(status)
+    }
+
+    fun resumePlayback() {
+        requestAudioFocus()
+        vlcMediaPlayer?.play()
+        val status = "正在播放"
+        updateNotification(status)
+        broadcastStatus(status)
+    }
+
+    /**
+     * 停止播放。
+     * @param abandonFocus 是否同时放弃音频焦点。内部切台时应传 false，
+     * 避免自行释放刚申请到的焦点，导致导航播报打断后无法恢复。
+     */
+    fun stopAllPlayback(abandonFocus: Boolean = true) {
+        if (abandonFocus) {
+            abandonAudioFocus()
+        }
+        try {
+            vlcMediaPlayer?.stop()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun broadcastStatus(status: String) {
+        lastStatusText = status
+        val currentChannel = playlistManager.getCurrentChannel()
+        val currentIndex = playlistManager.getCurrentIndex()
+        val intent = Intent(ACTION_STATUS_CHANGE).apply {
+            putExtra(EXTRA_STATUS, status)
+            putExtra(EXTRA_CURRENT_INDEX, currentIndex)
+            putExtra(EXTRA_CHANNEL, currentChannel)
+            putExtra(EXTRA_IS_PLAYING, isCurrentlyPlaying())
+            setPackage(packageName)
+        }
+        sendBroadcast(intent)
+    }
+
+    private fun buildNotification(statusText: String): Notification {
+        val currentChannel = playlistManager.getCurrentChannel()
+        val channelName = currentChannel?.name ?: "网络收音机"
+        val freq = currentChannel?.frequency ?: "网络广播"
+
+        val openAppIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pOpenApp = PendingIntent.getActivity(
+            this, 0, openAppIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+        )
+
+        val pPrev = PendingIntent.getService(
+            this, 2, Intent(this, RadioPlayerService::class.java).apply { action = ACTION_PREV },
+            PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+        )
+
+        val pToggle = PendingIntent.getService(
+            this, 1, Intent(this, RadioPlayerService::class.java).apply { action = ACTION_TOGGLE_PAUSE },
+            PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+        )
+
+        val pNext = PendingIntent.getService(
+            this, 3, Intent(this, RadioPlayerService::class.java).apply { action = ACTION_NEXT },
+            PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+        )
+
+        val isPlaying = isCurrentlyPlaying()
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(channelName)
+            .setContentText("$freq · $statusText")
+            .setSmallIcon(R.drawable.ic_radio)
+            .setContentIntent(pOpenApp)
+            .addAction(android.R.drawable.ic_media_previous, "上一台", pPrev)
+            .addAction(
+                if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
+                if (isPlaying) "暂停" else "播放",
+                pToggle
+            )
+            .addAction(android.R.drawable.ic_media_next, "下一台", pNext)
+            .setOngoing(isPlaying)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+    }
+
+    private fun updateNotification(statusText: String) {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager?.notify(NOTIFICATION_ID, buildNotification(statusText))
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "电台后台播放",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "展示当前播放的广播节目并提供播放控制"
+            }
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.createNotificationChannel(channel)
+        }
+    }
+
+    override fun onDestroy() {
+        try {
+            unregisterReceiver(carMediaCommandReceiver)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        stopAllPlayback()
+
+        // 先释放会话，再释放会话外壳与 LibVLC
+        try {
+            mediaSession?.release()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        mediaSession = null
+
+        try {
+            sessionShellPlayer.release()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        vlcMediaPlayer?.release()
+        libVLC?.release()
+        vlcMediaPlayer = null
+        libVLC = null
+
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+}
