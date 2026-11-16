@@ -200,15 +200,18 @@ class RadioPlayerService : Service() {
     }
 
     /**
-     * 识别 Tvheadend 特征流与 MPEG-TS 广播流
+     * 判断是否应走 LibVLC 原生引擎
+     * 仅以流本身的封装特征为据：
+     * 1. profile=pass —— Tvheadend 直通输出（未转封装）的广播流；
+     * 2. 路径以 .ts 结尾 —— MPEG-TS 封装。
+     * 不再依据 :8168 / :9981 / /stream/ 等具体服务器的端口与路径，避免换源后判断失效。
+     * .ts 只校验路径结尾而非裸子串匹配，避免域名（如 radio.ts.example.com）
+     * 或查询参数（如 ?name=.ts）造成误判。
      */
     private fun isTvheadendOrTs(url: String): Boolean {
-        return url.contains(":8168", ignoreCase = true) ||
-                url.contains(":9981", ignoreCase = true) ||
-                url.contains("/stream/", ignoreCase = true) ||
-                url.contains("profile=pass", ignoreCase = true) ||
-                url.contains(".ts", ignoreCase = true) ||
-                url.contains("audio/mp2t", ignoreCase = true)
+        val path = url.substringBefore('?').substringBefore('#')
+        return url.contains("profile=pass", ignoreCase = true) ||
+                path.endsWith(".ts", ignoreCase = true)
     }
 
     /**
