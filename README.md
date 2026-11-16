@@ -11,17 +11,11 @@
   - 方向键 `DPAD_UP/DOWN` 特意放行，不参与换台，保证列表焦点与遥控器导航正常；
   - 完善的音频焦点管理（AudioFocus），在导航播报、倒车雷达或来电时自动压低/暂停，播毕自动平滑恢复。
 
-- 🔊 **双引擎播放内核，按流自动路由**：
-  - **AndroidX Media3 (ExoPlayer)** —— 常规网络电台、HLS (`.m3u8`) 与标准 AAC/MP3 流，轻量省电；
-  - **VideoLAN LibVLC 3.x** —— Tvheadend 直通输出与 MPEG-TS 封装的广播流，负责 TS 解封装与 MP2/MPEG-2 音频解码；
-  - **两级容灾**：ExoPlayer 播放失败时自动降级到 LibVLC；LibVLC 硬解遇不兼容音频时自动回落软解，最大限度保证出声；
-  - 引擎路由只依据流的封装特征，不绑定任何具体服务器的端口与路径：
-
-    | 流的特征 | 走哪条引擎 |
-    | --- | --- |
-    | 含 `profile=pass` 参数 | LibVLC（Tvheadend 直通输出） |
-    | 路径以 `.ts` 结尾 | LibVLC（MPEG-TS 封装） |
-    | 其余（含 `.m3u8`、AAC、MP3） | ExoPlayer |
+- 🔊 **单一播放内核：全部流统一由 VideoLAN LibVLC 播放**：
+  - 不再按格式分流引擎，网络电台、HLS (`.m3u8`)、AAC/MP3、Tvheadend MPEG-TS 一律交由 LibVLC 解码，行为一致、不会因换源换引擎而出现「有的台能响、有的台不响」；
+  - TS 专用解封装参数（`:demux=ts`、`:ts-extra-pmt=1`、`:ts-trust-pcr`）改为按流类型**条件附加**，不会误伤 HLS 与普通音频流；
+  - **软硬解容灾**：车载芯片 MediaCodec 硬解对 MP2/MPEG-2 等广播音频不兼容报错时，自动回落 LibVLC 软解；软解仍失败则延时 2.5 秒重连；
+  - Media3 仅保留 `MediaSession` 车载会话所需的 Player 载体作用，**不参与任何解码**，因此不引入 HLS/RTSP 解封装器等冗余依赖。
 
 - 📻 **全套标准电台流媒体播放**：
   - 原生支持 HTTP / HTTPS 音频直播流、AAC、MP3 及 HLS (`.m3u8`) 广播流；
@@ -52,7 +46,7 @@
 
 - **最新稳定版下载**：[FM网络收音机.apk](https://github.com/zkkm2580/RadioFM/releases/latest)
 
-> ℹ️ 自 1.2 版引入 VideoLAN LibVLC 原生核心后，安装包内含 `armeabi-v7a` 与 `arm64-v8a` 两套 `.so` 动态库，体积较早期纯 Kotlin 版本明显增大，具体大小请以 Releases 页面显示为准。
+> ℹ️ 安装包内含 VideoLAN LibVLC 的 `armeabi-v7a` 与 `arm64-v8a` 两套 `.so` 动态库，体积较早期纯 Kotlin 版本明显增大，具体大小请以 Releases 页面显示为准。
 
 ---
 
@@ -61,10 +55,10 @@
 - **语言与工具链**：Kotlin 1.9.22、Java 17、AGP 8.2.2、Gradle 8.5
 - **编译目标**：compileSdk 34 / targetSdk 34 / minSdk 21（Android 5.0+），仅打包 `armeabi-v7a`、`arm64-v8a`
 - **核心组件**：
-  - `androidx.media3:media3-exoplayer` + `media3-exoplayer-hls` + `media3-exoplayer-rtsp`（流媒体引擎）
+  - `org.videolan.android:libvlc-all`（**唯一播放引擎**：全格式解封装、软硬解容灾）
   - `androidx.media3:media3-session`（车载媒体会话协议）
+  - `androidx.media3:media3-exoplayer`（仅提供 MediaSession 所需的 Player 载体，不参与解码）
   - `androidx.media:media`（经典车载 Media 兼容）
-  - `org.videolan.android:libvlc-all`（Tvheadend / MPEG-TS 解封装与软硬解容灾）
   - `androidx.appcompat`（DayNight 夜间模式支持）
   - `androidx.recyclerview`（电台列表高效渲染）
 
@@ -75,7 +69,7 @@ app/src/main/java/io/microshow/fm/
 ├── data/RadioRepository.kt            电台源拉取、文本解析、URL 兼容处理
 ├── model/RadioChannel.kt              频道数据模型
 ├── player/PlaylistManager.kt          VLC 风格播放列表与循环切台
-├── player/RadioPlayerService.kt       前台服务：双引擎路由、MediaSession、AudioFocus、通知栏
+├── player/RadioPlayerService.kt       前台服务：LibVLC 播放、MediaSession、AudioFocus、通知栏
 ├── ui/MainActivity.kt                 主界面：时钟、定位天气、频道列表
 ├── ui/ChannelAdapter.kt               频道列表适配器
 ├── ui/PlayerKeyListenerDelegate.kt    车机按键拦截与防抖

@@ -55,11 +55,12 @@ jobs:
         body: |
           ### FM网络收音机 (RadioFM) 更新说明
           
-          - 📻 **双引擎智能路由，深度集成 VideoLAN LibVLC 原生底层核心**：
-            - 引擎路由仅依据流的封装特征：含 `profile=pass` 参数（Tvheadend 直通输出）或路径以 `.ts` 结尾（MPEG-TS 封装）时交由 VideoLAN LibVLC 解封装播放，其余流仍由 Media3 ExoPlayer 处理；
-            - 注入原生 VLC User-Agent 与 `:demux=ts`、`:ts-extra-pmt=1`、`--ts-trust-pcr`，解决 MPEG-TS 时钟同步与丢包卡死问题；
+          - 📻 **播放内核统一为 VideoLAN LibVLC，所有电台流一律由 VLC 播放**：
+            - 不再按格式分流引擎：网络电台、HLS (`.m3u8`)、AAC/MP3、Tvheadend MPEG-TS 全部交由 LibVLC 解码，避免换源换引擎导致的“有的台能响、有的台不响”；
+            - TS 专用参数（`:demux=ts`、`:ts-extra-pmt=1`、`--ts-trust-pcr`）改为按流类型条件附加，不再误伤 HLS 与普通音频流；
+            - Media3 仅保留 `MediaSession` 车载会话所需的 Player 载体作用，不参与解码，同时移除 media3-exoplayer-hls / rtsp / ui 等冗余依赖；
             - 增加软硬解智能容灾：当车载芯片 MediaCodec 硬解对 MP2/MPEG-2 音频不兼容报错时，自动毫秒级回退至 LibVLC 软解，确保 100% 能够出声！
-            - **优化屏显状态实时联动**：精准监听 LibVLC 播放事件与解码推进（TimeChanged），解决播放 Tvheadend 时界面卡在“正在缓冲(TS)”的问题，及时准确实时显示“正常播放(TS)”。
+            - **优化屏显状态实时联动**：精准监听 LibVLC 播放事件与解码推进（TimeChanged），不再出现卡在“正在缓冲”的假状态。
           
           - 🚗 **全面支持汽车方向盘换台与车载中控控制**：
             - 深度集成经典与现代 Android `MediaSession` 车载媒体会话协议；
