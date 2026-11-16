@@ -33,7 +33,7 @@ jobs:
     - name: 整理发布 APK 文件
       id: release_apk
       run: |
-        TAG_NAME="v1.2.1-$(date +'%Y%m%d%H%M')"
+        TAG_NAME="v1.2.2-$(date +'%Y%m%d%H%M')"
         echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
         mkdir -p release_dist
         # 同时保留中文名与 URL 安全名称，确保任意浏览器下载均不乱码
@@ -51,16 +51,17 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.release_apk.outputs.tag_name }}
-        name: FM网络收音机 v1.2.1 (${{ steps.release_apk.outputs.tag_name }})
+        name: FM网络收音机 v1.2.2 (${{ steps.release_apk.outputs.tag_name }})
         body: |
           ### FM网络收音机 (RadioFM) 更新说明
 
-          > ⚠️ 本版本为**回滚版**：播放链路整体恢复至 v1.2.1 的实现，撤回 v1.2.2 引入的显式 `:codec` 列表、去掉 stop、三档解码容灾三项改动。versionCode 为 6，可直接覆盖安装 1.2.2。
+          > ℹ️ 本版本基于反编译官方 VLC 客户端的一手结论整合：播放链路保持 v1.2.1 不变（信任 libvlc demux probe、不强制格式），仅将 libvlc-all 从 3.6.5 升级到 3.7.1（内核 3.0.22-rc1 → 3.0.23 正式版，与官方同款），并修正 `:codec=all` 注释。versionCode 为 7，可直接覆盖安装。
 
           - 📻 **播放内核统一为 VideoLAN LibVLC，所有电台流一律由 VLC 播放**：
             - 不再按格式分流引擎：网络电台、HLS (`.m3u8`)、AAC/MP3、Tvheadend MPEG-TS 全部交由 LibVLC 解码，避免换源换引擎导致的“有的台能响、有的台不响”；
             - 默认不向 LibVLC 声明容器格式：解封装由 libvlc 自带的 demux probe 现场判定（TS 校验 0x47 同步字节与 188 字节包对齐，HLS 校验 `#EXTM3U` / `application/vnd.apple.mpegurl`），与 VLC 官方客户端机制一致，不再按 URL 猜格式；
-            - 硬解开关交给 `Media.setHWDecoderEnabled()`（等价 `:codec=mediacodec_ndk,mediacodec_jni,none`），移除全局非法的 `--codec=...all`；
+            - 硬解开关交给 `Media.setHWDecoderEnabled()`（官方源码：开硬解 `:codec=<Mediacodec模块>,all`，关硬解 `:codec=all`，`all` 为有效伪模块名）；
+            - 内核升级至 libvlc-all 3.7.1（LibVLC 3.0.23 正式版，与官方 VLC 客户端同款，修复 3.0.22-rc1 候选版缺陷）；
             - 三级容灾：自动探测失败 → 强制 `:demux=ts` 重试 → 强制 TS 并转 libavcodec 软解 → 延时回到自动探测；TS 专用参数只在兜底轮次出现；
             - 网络缓冲收敛到 1500ms，避免直播流延迟持续堆积；UA 对齐官方式样 `VLC/3.0.23 LibVLC/3.0.23`；
             - Media3 仅保留 `MediaSession` 车载会话所需的 Player 载体作用，不参与解码，同时移除 media3-exoplayer-hls / rtsp / ui 等冗余依赖；
