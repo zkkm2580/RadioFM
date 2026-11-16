@@ -14,10 +14,9 @@
 - 🔊 **单一播放内核：全部流统一由 VideoLAN LibVLC 播放**：
   - 不再按格式分流引擎，网络电台、HLS (`.m3u8`)、AAC/MP3、Tvheadend MPEG-TS 一律交由 LibVLC 解码，行为一致、不会因换源换引擎而出现「有的台能响、有的台不响」；
   - **默认不向 LibVLC 声明容器格式**，解封装方式由 libvlc 自带的 demux probe 现场判定（TS 校验 `0x47` 同步字节与 188 字节包对齐、HLS 校验 `#EXTM3U` 与 `application/vnd.apple.mpegurl`、MP4 校验 box 结构）。这正是 VLC 官方客户端能同时直接播放 TS 与 HLS 的机制——**它从不猜格式**，我们也照此实现；
-  - 解码器列表显式写出软解兜底：`:codec=mediacodec_ndk,mediacodec_jni,avcodec,none`。**不能只写硬解模块名**——LibVLC 3.6.5 的 `Media.setHWDecoderEnabled()` 拼出来的是 `:codec=<硬解>,all`，其中 `all` 并不是有效模块名，等于把软解兜底丢掉了，MP2 / AC3 / HE-AAC(i) / OGG 这类硬解不支持的编码就会「有信号、没声音」；
-  - **三档解码容灾，全程不猜容器**：硬解优先（probe 自动判定容器）→ 全软解（`:codec=avcodec,none` + `:avcodec-hw=none`）→ 软解并让 HLS 只选最低码率 + 缩短缓冲，仍失败则延时 3 秒回到第一档。旧实现会在兜底轮次强制 `:demux=ts`，一旦首轮因网络抖动报错，后续就把 HLS / MP3 源全部按 TS 解析，等于把好源打死，已移除；
-  - 切台直接替换 media，不再「先 `stop()` 再 `setMedia()`」：libvlc 的 stop 是异步的，紧跟其后的 setMedia 会被丢弃，表现为点了没反应、要再点一次；
-  - 网络与直播缓冲取 1500 ms（与官方客户端同量级），失败后降到 800 ms；开启 `--http-reconnect` 应对直播断流，并以 `--no-video` 避免车机无 Surface 时 vout 初始化失败拖死整条流；
+  - 硬解开关交给 `Media.setHWDecoderEnabled()`（等价于 `:codec=mediacodec_ndk,mediacodec_jni,none`），不在全局用 `--codec` 指定解码器列表；
+  - **三级容灾**：自动探测失败 → 强制 `:demux=ts` 重试 → 强制 TS 并转 libavcodec 软解 → 仍失败则延时 3 秒回到自动探测。TS 专用参数只在兜底轮次出现，绝不参与首轮播放；
+  - 网络缓冲取 1500 ms（与官方客户端同量级），避免直播流延迟持续堆积；
   - Media3 仅保留 `MediaSession` 车载会话所需的 Player 载体作用，**不参与任何解码**，因此不引入 HLS/RTSP 解封装器等冗余依赖。
 
 - 📻 **全套标准电台流媒体播放**：
