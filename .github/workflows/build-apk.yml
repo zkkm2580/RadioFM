@@ -55,9 +55,9 @@ jobs:
         body: |
           ### FM网络收音机 (RadioFM) 更新说明
           
-          - 📻 **深度集成 VideoLAN LibVLC 原生底层核心，完美播放 Tvheadend 广播流**：
-            - 将 Tvheadend 特征流（8168 端口、`/stream/`、`audio/mp2t`）全面交由 VideoLAN LibVLC 核心引擎解封装与播放；
-            - 注入原生 VLC User-Agent 与 `:demux=ts`、`:ts-extra-pmt=1`、`--ts-trust-pcr`，彻底解决 MPEG-TS 时钟同步与丢包卡死问题；
+          - 📻 **双引擎智能路由，深度集成 VideoLAN LibVLC 原生底层核心**：
+            - 引擎路由仅依据流的封装特征：含 `profile=pass` 参数（Tvheadend 直通输出）或路径以 `.ts` 结尾（MPEG-TS 封装）时交由 VideoLAN LibVLC 解封装播放，其余流仍由 Media3 ExoPlayer 处理；
+            - 注入原生 VLC User-Agent 与 `:demux=ts`、`:ts-extra-pmt=1`、`--ts-trust-pcr`，解决 MPEG-TS 时钟同步与丢包卡死问题；
             - 增加软硬解智能容灾：当车载芯片 MediaCodec 硬解对 MP2/MPEG-2 音频不兼容报错时，自动毫秒级回退至 LibVLC 软解，确保 100% 能够出声！
             - **优化屏显状态实时联动**：精准监听 LibVLC 播放事件与解码推进（TimeChanged），解决播放 Tvheadend 时界面卡在“正在缓冲(TS)”的问题，及时准确实时显示“正常播放(TS)”。
           
