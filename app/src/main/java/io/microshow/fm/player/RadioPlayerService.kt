@@ -22,16 +22,8 @@ import android.util.Log
 import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.ForwardingPlayer
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MimeTypes
-import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.extractor.DefaultExtractorsFactory
-import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
-import androidx.media3.extractor.ts.TsExtractor
 import androidx.media3.session.MediaSession
 import io.microshow.fm.R
 import io.microshow.fm.data.RadioRepository
@@ -42,19 +34,26 @@ import org.videolan.libvlc.Media
 
 /**
  * FM网络收音机核心播放服务
- * 双引擎架构：
- * 1. VideoLAN LibVLC 原生底层引擎：专用于 Tvheadend MPEG-TS 纯音频广播流（支持 TS 解封装与软硬解自动容灾）；
- * 2. AndroidX Media3 (ExoPlayer) 引擎：用于常规网络电台、HLS (.m3u8) 与标准 AAC/MP3 流。
- * 完善的车载方向盘切台、MediaSession 协议与音频焦点（AudioFocus）管理。
+ * 单引擎架构：所有电台流（网络电台、HLS .m3u8、AAC/MP3、Tvheadend MPEG-TS）
+ * 统一交由 VideoLAN LibVLC 解码播放。
+ *
+ * Media3 仅在三处保留用途，均不参与解码：
+ * 1. MediaSession 车载会话需要一个 Player 实例作为载体；
+ * 2. 车机方向盘与中控的播放/暂停/上下台指令入口；
+ * 3. 通知栏与大屏会话的播放状态同步。
+ * 因此 ExoPlayer 实例只作为“会话外壳”存在，从不会被赋予媒体源，也不会真正播放。
  */
 class RadioPlayerService : Service() {
 
-    private lateinit var exoPlayer: ExoPlayer
+    /**
+     * 仅作为 MediaSession 的 Player 外壳，不承载任何解码播放。
+     * 真正的声音全部由 vlcMediaPlayer 输出。
+     */
+    private lateinit var sessionShellPlayer: ExoPlayer
 
-    // VideoLAN LibVLC 原生播放核心（专用于 Tvheadend TS 流）
+    // VideoLAN LibVLC 原生播放核心（唯一播放引擎）
     private var libVLC: LibVLC? = null
     private var vlcMediaPlayer: org.videolan.libvlc.MediaPlayer? = null
-    private var isUsingVlcPlayer = false
     private var hasTriedVlcSoftwareFallback = false
 
     private var mediaSession: MediaSession? = null
@@ -178,7 +177,7 @@ class RadioPlayerService : Service() {
     override fun onCreate() {
         super.onCreate()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        initExoPlayer()
+        initSessionShellPlayer()
         initLibVlc()
         createNotificationChannel()
         registerCarMediaReceiver()
@@ -200,22 +199,19 @@ class RadioPlayerService : Service() {
     }
 
     /**
-     * 判断是否应走 LibVLC 原生引擎
-     * 仅以流本身的封装特征为据：
-     * 1. profile=pass —— Tvheadend 直通输出（未转封装）的广播流；
-     * 2. 路径以 .ts 结尾 —— MPEG-TS 封装。
-     * 不再依据 :8168 / :9981 / /stream/ 等具体服务器的端口与路径，避免换源后判断失效。
-     * .ts 只校验路径结尾而非裸子串匹配，避免域名（如 radio.ts.example.com）
-     * 或查询参数（如 ?name=.ts）造成误判。
+     * 判断是否为 MPEG-TS 封装流。
+     * 注意：该判断已不再决定“由谁播放”（全部由 LibVLC 播放），
+     * 仅用于决定是否向 LibVLC 追加 TS 专用解封装参数。
+     * 若对 HLS(.m3u8) 也强制 :demux=ts，会导致 HLS 无法解析，故必须区分。
      */
-    private fun isTvheadendOrTs(url: String): Boolean {
+    private fun isMpegTsStream(url: String): Boolean {
         val path = url.substringBefore('?').substringBefore('#')
         return url.contains("profile=pass", ignoreCase = true) ||
                 path.endsWith(".ts", ignoreCase = true)
     }
 
     /**
-     * 初始化 VideoLAN LibVLC 原生解码引擎
+     * 初始化 VideoLAN LibVLC 原生解码引擎（唯一播放引擎）
      */
     private fun initLibVlc() {
         try {
@@ -234,17 +230,16 @@ class RadioPlayerService : Service() {
             libVLC = LibVLC(this, options)
             vlcMediaPlayer = org.videolan.libvlc.MediaPlayer(libVLC).apply {
                 setEventListener { event ->
-                    if (!isUsingVlcPlayer) return@setEventListener
                     when (event.type) {
                         org.videolan.libvlc.MediaPlayer.Event.Buffering -> {
                             val percent = event.buffering
-                            // 如果已经在正常播放中且缓冲完毕，保持“正常播放(TS)”；仅在未开始播放且缓冲不足时提示缓冲
+                            // 已经在正常播放中且缓冲未归零时保持“正在播放”，仅在未开播且缓冲不足时提示缓冲
                             if (percent < 100.0f && !isPlaying) {
-                                val status = "正在缓冲(TS)..."
+                                val status = "正在缓冲..."
                                 updateNotification(status)
                                 broadcastStatus(status)
                             } else if (isPlaying || percent >= 100.0f) {
-                                val status = "正常播放(TS)"
+                                val status = "正在播放"
                                 if (lastStatusText != status) {
                                     updateNotification(status)
                                     broadcastStatus(status)
@@ -252,12 +247,12 @@ class RadioPlayerService : Service() {
                             }
                         }
                         org.videolan.libvlc.MediaPlayer.Event.Playing -> {
-                            val status = "正常播放(TS)"
+                            val status = "正在播放"
                             updateNotification(status)
                             broadcastStatus(status)
                         }
                         org.videolan.libvlc.MediaPlayer.Event.Paused -> {
-                            val status = "已暂停(TS)"
+                            val status = "已暂停"
                             updateNotification(status)
                             broadcastStatus(status)
                         }
@@ -267,15 +262,15 @@ class RadioPlayerService : Service() {
                             broadcastStatus(status)
                         }
                         org.videolan.libvlc.MediaPlayer.Event.TimeChanged -> {
-                            // 只要音频在推进，且状态未显示为“正常播放(TS)”，立即纠偏为“正常播放(TS)”
-                            if (isPlaying && lastStatusText != "正常播放(TS)") {
-                                val status = "正常播放(TS)"
+                            // 只要音频在推进，且状态未显示为“正在播放”，立即纠偏
+                            if (isPlaying && lastStatusText != "正在播放") {
+                                val status = "正在播放"
                                 updateNotification(status)
                                 broadcastStatus(status)
                             }
                         }
                         org.videolan.libvlc.MediaPlayer.Event.EncounteredError -> {
-                            Log.w(TAG, "LibVLC 播放 Tvheadend 异常，准备容灾降级软解重试")
+                            Log.w(TAG, "LibVLC 播放异常，准备容灾降级软解重试")
                             handleVlcPlaybackError()
                         }
                         org.videolan.libvlc.MediaPlayer.Event.EndReached -> {
@@ -292,67 +287,17 @@ class RadioPlayerService : Service() {
         }
     }
 
-    private fun initExoPlayer() {
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(VLC_USER_AGENT)
-            .setConnectTimeoutMs(20000)
-            .setReadTimeoutMs(20000)
-            .setAllowCrossProtocolRedirects(true)
-
-        val extractorsFactory = DefaultExtractorsFactory()
-            .setTsExtractorFlags(
-                DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES or
-                        DefaultTsPayloadReaderFactory.FLAG_DETECT_ACCESS_UNITS
-            )
-            .setTsExtractorMode(TsExtractor.MODE_MULTI_PMT)
-
-        val mediaSourceFactory = DefaultMediaSourceFactory(httpDataSourceFactory, extractorsFactory)
-
-        exoPlayer = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(mediaSourceFactory)
+    /**
+     * 初始化 MediaSession 车载会话外壳。
+     * ExoPlayer 不加载任何媒体，仅作为 Player 实例承载 MediaSession，
+     * 所有播放指令最终都被 ForwardingPlayer 转发到 LibVLC。
+     */
+    private fun initSessionShellPlayer() {
+        sessionShellPlayer = ExoPlayer.Builder(this)
             .setHandleAudioBecomingNoisy(true)
             .build()
 
-        exoPlayer.addListener(object : Player.Listener {
-            override fun onPlaybackStateChanged(state: Int) {
-                if (isUsingVlcPlayer) return
-                val status = when (state) {
-                    Player.STATE_BUFFERING -> "正在缓冲..."
-                    Player.STATE_READY -> if (exoPlayer.isPlaying) "正在播放" else "已暂停"
-                    Player.STATE_ENDED -> "播放结束"
-                    else -> "就绪"
-                }
-                updateNotification(status)
-                broadcastStatus(status)
-            }
-
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (isUsingVlcPlayer) return
-                val status = if (isPlaying) "正在播放" else "已暂停"
-                updateNotification(status)
-                broadcastStatus(status)
-            }
-
-            override fun onPlayerError(error: PlaybackException) {
-                Log.e(TAG, "ExoPlayer 播放错误: ${error.errorCodeName}", error)
-                playlistManager.getCurrentChannel()?.let { ch ->
-                    val cleanUrl = RadioRepository.sanitizeUrl(ch.streamUrl)
-                    if (!isUsingVlcPlayer) {
-                        Log.d(TAG, "自动故障转移切换至 LibVLC 原生底层引擎播放...")
-                        hasTriedVlcSoftwareFallback = false
-                        playWithLibVlc(cleanUrl, useSoftwareDecoder = false)
-                        return
-                    }
-                }
-                val status = "播放重试中..."
-                updateNotification(status)
-                broadcastStatus(status)
-                exoPlayer.prepare()
-                exoPlayer.play()
-            }
-        })
-
-        val forwardingPlayer = object : ForwardingPlayer(exoPlayer) {
+        val forwardingPlayer = object : ForwardingPlayer(sessionShellPlayer) {
             override fun play() {
                 resumePlayback()
             }
@@ -529,8 +474,8 @@ class RadioPlayerService : Service() {
             ACTION_TOGGLE_PAUSE -> togglePlayback()
 
             ACTION_REQUEST_STATUS -> {
-                val effectiveStatus = if (isUsingVlcPlayer && vlcMediaPlayer?.isPlaying == true) {
-                    "正常播放(TS)"
+                val effectiveStatus = if (vlcMediaPlayer?.isPlaying == true) {
+                    "正在播放"
                 } else {
                     lastStatusText
                 }
@@ -563,7 +508,6 @@ class RadioPlayerService : Service() {
     }
 
     private fun playChannel(channel: RadioChannel) {
-        requestAudioFocus()
         val cleanUrl = RadioRepository.sanitizeUrl(channel.streamUrl)
 
         val notification = buildNotification("正在连接...")
@@ -573,22 +517,19 @@ class RadioPlayerService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
-        if (isTvheadendOrTs(cleanUrl)) {
-            Log.d(TAG, "检测到 Tvheadend/TS 流，使用 VideoLAN LibVLC 原生底层核心播放: $cleanUrl")
-            hasTriedVlcSoftwareFallback = false
-            playWithLibVlc(cleanUrl, useSoftwareDecoder = false)
-        } else {
-            Log.d(TAG, "使用 ExoPlayer 引擎播放: $cleanUrl")
-            playWithExoPlayer(cleanUrl)
-        }
+        Log.d(TAG, "使用 VideoLAN LibVLC 播放: $cleanUrl")
+        hasTriedVlcSoftwareFallback = false
+        playWithLibVlc(cleanUrl, useSoftwareDecoder = false)
     }
 
     /**
-     * 使用 VideoLAN LibVLC 原生核心播放 Tvheadend MPEG-TS 流
+     * 使用 VideoLAN LibVLC 播放任意电台流。
+     * TS 专用参数按流类型条件附加，避免 HLS / 普通音频流被误按 TS 解封装。
      */
     private fun playWithLibVlc(url: String, useSoftwareDecoder: Boolean = false) {
-        stopAllPlayback()
-        isUsingVlcPlayer = true
+        // 切换电台时内部停止，不能顺带放弃音频焦点，否则刚申请的焦点会被自己释放掉
+        stopAllPlayback(abandonFocus = false)
+        requestAudioFocus()
 
         val vlc = libVLC ?: run {
             initLibVlc()
@@ -596,6 +537,7 @@ class RadioPlayerService : Service() {
         } ?: return
 
         val player = vlcMediaPlayer ?: return
+        val isTs = isMpegTsStream(url)
 
         try {
             player.stop()
@@ -604,15 +546,18 @@ class RadioPlayerService : Service() {
                 addOption(":http-user-agent=$VLC_USER_AGENT")
                 addOption(":network-caching=2500")
                 addOption(":http-reconnect=true")
-                addOption(":demux=ts")
-                addOption(":ts-extra-pmt=1")
-                addOption(":ts-trust-pcr")
+                // 仅 MPEG-TS 强制解封装；HLS(.m3u8) 与 AAC/MP3 交给 VLC 自动识别
+                if (isTs) {
+                    addOption(":demux=ts")
+                    addOption(":ts-extra-pmt=1")
+                    addOption(":ts-trust-pcr")
+                }
             }
             player.media = media
             media.release()
             player.play()
 
-            val status = if (useSoftwareDecoder) "正在连接(TS软解)..." else "正在连接(TS)..."
+            val status = if (useSoftwareDecoder) "正在连接(软解)..." else "正在连接..."
             updateNotification(status)
             broadcastStatus(status)
         } catch (e: Exception) {
@@ -622,17 +567,17 @@ class RadioPlayerService : Service() {
     }
 
     /**
-     * Tvheadend 播放异常自愈容灾：当硬解对特定广播 MP2 音频流不支持时，自动切换 LibVLC 软解
+     * 播放异常自愈容灾：当硬解对特定广播音频流（如 MP2）不支持时，自动切换 LibVLC 软解
      */
     private fun handleVlcPlaybackError() {
         val channel = playlistManager.getCurrentChannel() ?: return
         val cleanUrl = RadioRepository.sanitizeUrl(channel.streamUrl)
         if (!hasTriedVlcSoftwareFallback) {
             hasTriedVlcSoftwareFallback = true
-            Log.d(TAG, "Tvheadend 硬解受限，自动切换至 LibVLC 原生软解模式...")
+            Log.d(TAG, "硬解受限，自动切换至 LibVLC 原生软解模式...")
             playWithLibVlc(cleanUrl, useSoftwareDecoder = true)
         } else {
-            val status = "正在重连(TS)..."
+            val status = "正在重连..."
             updateNotification(status)
             broadcastStatus(status)
             mainHandler.postDelayed({
@@ -642,28 +587,8 @@ class RadioPlayerService : Service() {
         }
     }
 
-    private fun playWithExoPlayer(url: String) {
-        stopAllPlayback()
-        isUsingVlcPlayer = false
-
-        val mediaItemBuilder = MediaItem.Builder().setUri(url)
-        if (url.contains(".m3u8", ignoreCase = true)) {
-            mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-        }
-
-        exoPlayer.setMediaItem(mediaItemBuilder.build())
-        exoPlayer.prepare()
-        exoPlayer.play()
-        updateNotification("正在连接...")
-        broadcastStatus("正在连接...")
-    }
-
     fun isCurrentlyPlaying(): Boolean {
-        return if (isUsingVlcPlayer) {
-            vlcMediaPlayer?.isPlaying == true
-        } else {
-            exoPlayer.isPlaying
-        }
+        return vlcMediaPlayer?.isPlaying == true
     }
 
     fun togglePlayback() {
@@ -671,46 +596,28 @@ class RadioPlayerService : Service() {
     }
 
     fun pausePlayback() {
-        if (isUsingVlcPlayer) {
-            vlcMediaPlayer?.pause()
-            val status = "已暂停(TS)"
-            updateNotification(status)
-            broadcastStatus(status)
-        } else {
-            exoPlayer.pause()
-            val status = "已暂停"
-            updateNotification(status)
-            broadcastStatus(status)
-        }
+        vlcMediaPlayer?.pause()
+        val status = "已暂停"
+        updateNotification(status)
+        broadcastStatus(status)
     }
 
     fun resumePlayback() {
-        requestFocus()
-        if (isUsingVlcPlayer) {
-            vlcMediaPlayer?.play()
-            val status = "正常播放(TS)"
-            updateNotification(status)
-            broadcastStatus(status)
-        } else {
-            exoPlayer.play()
-            val status = "正在播放"
-            updateNotification(status)
-            broadcastStatus(status)
-        }
-    }
-
-    private fun requestFocus() {
         requestAudioFocus()
+        vlcMediaPlayer?.play()
+        val status = "正在播放"
+        updateNotification(status)
+        broadcastStatus(status)
     }
 
-    fun stopAllPlayback() {
-        abandonAudioFocus()
-        try {
-            if (exoPlayer.isPlaying || exoPlayer.playbackState != Player.STATE_IDLE) {
-                exoPlayer.stop()
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
+    /**
+     * 停止播放。
+     * @param abandonFocus 是否同时放弃音频焦点。内部切台时应传 false，
+     * 避免自行释放刚申请到的焦点，导致导航播报打断后无法恢复。
+     */
+    fun stopAllPlayback(abandonFocus: Boolean = true) {
+        if (abandonFocus) {
+            abandonAudioFocus()
         }
         try {
             vlcMediaPlayer?.stop()
@@ -805,16 +712,26 @@ class RadioPlayerService : Service() {
             e.printStackTrace()
         }
         stopAllPlayback()
+
+        // 先释放会话，再释放会话外壳与 LibVLC
+        try {
+            mediaSession?.release()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        mediaSession = null
+
+        try {
+            sessionShellPlayer.release()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
         vlcMediaPlayer?.release()
         libVLC?.release()
         vlcMediaPlayer = null
         libVLC = null
 
-        mediaSession?.run {
-            exoPlayer.release()
-            release()
-            mediaSession = null
-        }
         super.onDestroy()
     }
 

@@ -50,13 +50,11 @@ dependencies {
     // 经典车载 Media 兼容支持
     implementation("androidx.media:media:1.7.0")
 
-    // Media3 / ExoPlayer 核心组件
+    // Media3 / ExoPlayer：仅作为 MediaSession 的 Player 载体，不参与解码播放
+    // （不再依赖 media3-exoplayer-hls / rtsp，所有流格式统一由 LibVLC 处理）
     implementation("androidx.media3:media3-exoplayer:1.2.1")
-    implementation("androidx.media3:media3-exoplayer-hls:1.2.1")
-    implementation("androidx.media3:media3-exoplayer-rtsp:1.2.1")
-    implementation("androidx.media3:media3-ui:1.2.1")
     implementation("androidx.media3:media3-session:1.2.1")
 
-    // VideoLAN LibVLC 官方底层核心引擎 (用于 Tvheadend MPEG-TS 广播流的高可靠解码与软硬解容灾)
+    // VideoLAN LibVLC 官方底层核心引擎（唯一播放引擎：网络电台 / HLS / TS 全格式）
     implementation("org.videolan.android:libvlc-all:3.6.5")
 }
