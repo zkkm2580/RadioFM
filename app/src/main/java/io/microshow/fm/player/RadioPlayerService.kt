@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
@@ -54,7 +55,16 @@ class RadioPlayerService : Service() {
     // VideoLAN LibVLC 原生播放核心（唯一播放引擎）
     private var libVLC: LibVLC? = null
     private var vlcMediaPlayer: org.videolan.libvlc.MediaPlayer? = null
-    private var hasTriedVlcSoftwareFallback = false
+
+    /**
+     * 当前电台的重试轮次，用于逐级放宽/收紧解封装约束。
+     * 0 = 自动探测（默认）  1 = 强制 TS 解封装  2 = 强制 TS + 软解
+     * 切台时重置为 0。
+     */
+    private var playbackAttempt = 0
+
+    /** 上次处理播放异常的时间戳（elapsedRealtime），用于抑制连续错误事件的抖动 */
+    private var lastErrorHandledAt = 0L
 
     private var mediaSession: MediaSession? = null
     private lateinit var audioManager: AudioManager
@@ -67,7 +77,12 @@ class RadioPlayerService : Service() {
 
     companion object {
         private const val TAG = "RadioPlayerService"
-        const val VLC_USER_AGENT = "VLC/3.0.18 (Linux; Android)"
+        /**
+         * 与 VLC 官方客户端一致的 UA 形态：`VLC/版本 LibVLC/版本`。
+         * 原实现写成 "VLC/3.0.18 (Linux; Android)"，括号注释段并非 VLC 的真实格式，
+         * 个别源站会按 UA 前缀做白名单，这里对齐官方式样以降低被拒风险。
+         */
+        const val VLC_USER_AGENT = "VLC/3.0.23 LibVLC/3.0.23"
 
         const val ACTION_PLAY = "io.microshow.fm.ACTION_PLAY"
         const val ACTION_TOGGLE_PAUSE = "io.microshow.fm.ACTION_TOGGLE_PAUSE"
@@ -199,33 +214,32 @@ class RadioPlayerService : Service() {
     }
 
     /**
-     * 判断是否为 MPEG-TS 封装流。
-     * 注意：该判断已不再决定“由谁播放”（全部由 LibVLC 播放），
-     * 仅用于决定是否向 LibVLC 追加 TS 专用解封装参数。
-     * 若对 HLS(.m3u8) 也强制 :demux=ts，会导致 HLS 无法解析，故必须区分。
-     */
-    private fun isMpegTsStream(url: String): Boolean {
-        val path = url.substringBefore('?').substringBefore('#')
-        return url.contains("profile=pass", ignoreCase = true) ||
-                path.endsWith(".ts", ignoreCase = true)
-    }
-
-    /**
-     * 初始化 VideoLAN LibVLC 原生解码引擎（唯一播放引擎）
+     * 初始化 VideoLAN LibVLC 原生解码引擎（唯一播放引擎）。
+     *
+     * 这里刻意保持极少的全局参数，与 VLC 官方 Android 客户端（VLC 3.x）的做法一致：
+     * 官方 APK 的 LibVLC 初始化只设一个 `--network-caching=1500`，
+     * 再按需设置 `--aout` / `--audio-resampler`，**不与任何容器格式绑定的参数**。
+     *
+     * 原因是每种流的解封装方式由 libvlc 的 demux 模块自带 probe 现场判定：
+     *   - TS：校验 0x47 同步字节与 188 字节包对齐（失败时报 "No Transport Stream sync byte in data."）；
+     *   - HLS：校验 `#EXTM3U` / `#EXT-X-STREAM-INF` / `application/vnd.apple.mpegurl` 等特征；
+     *   - 其他：MP4 box、PES 起始码等各自探测。
+     * 调用方一旦用 `--codec` / `--ts-trust-pcr` 这类全局参数替它做决定，
+     * 就等于把“多格式通吃”的能力关掉了，只剩单一格式可用。
+     *
+     * 历史问题记录：原实现用了 `--codec=mediacodec_ndk,mediacodec_jni,all`。
+     * `all` 并不是有效的解码器模块名，会让 libvlc 的 codec 列表解析落空，
+     * 反而可能让 MediaCodec 硬解不被选中。硬解开关应交给 Media 级的
+     * `setHWDecoderEnabled()`（内部即 `:codec=mediacodec_ndk,mediacodec_jni,none`）。
      */
     private fun initLibVlc() {
         try {
             val options = arrayListOf(
-                "--http-user-agent=$VLC_USER_AGENT",
-                "--network-caching=2500",
-                "--live-caching=2000",
-                "--file-caching=2000",
-                "--sout-mux-caching=2000",
-                "--codec=mediacodec_ndk,mediacodec_jni,all",
-                "--http-reconnect",
-                "--ts-trust-pcr",
-                "--no-sub-autodetect-file",
-                "-vvv"
+                // 网络缓冲：与官方客户端取同一量级。过大的值（如 2500）会让直播流延迟持续堆积，
+                // 切台后画面/声音明显滞后，且弱网恢复后要等更久才出声。
+                "--network-caching=1500",
+                // 纯音频应用，关闭字幕文件自动探测，避免网络流里的字幕轨拖慢解封装
+                "--no-sub-autodetect-file"
             )
             libVLC = LibVLC(this, options)
             vlcMediaPlayer = org.videolan.libvlc.MediaPlayer(libVLC).apply {
@@ -276,7 +290,8 @@ class RadioPlayerService : Service() {
                         org.videolan.libvlc.MediaPlayer.Event.EndReached -> {
                             playlistManager.getCurrentChannel()?.let {
                                 val cleanUrl = RadioRepository.sanitizeUrl(it.streamUrl)
-                                playWithLibVlc(cleanUrl, useSoftwareDecoder = false)
+                                playbackAttempt = 0
+                                playWithLibVlc(cleanUrl)
                             }
                         }
                     }
@@ -518,15 +533,27 @@ class RadioPlayerService : Service() {
         }
 
         Log.d(TAG, "使用 VideoLAN LibVLC 播放: $cleanUrl")
-        hasTriedVlcSoftwareFallback = false
-        playWithLibVlc(cleanUrl, useSoftwareDecoder = false)
+        // 换台即重置重试轮次与错误防抖，新一轮从“自动探测”开始
+        playbackAttempt = 0
+        lastErrorHandledAt = 0L
+        playWithLibVlc(cleanUrl)
     }
 
     /**
      * 使用 VideoLAN LibVLC 播放任意电台流。
-     * TS 专用参数按流类型条件附加，避免 HLS / 普通音频流被误按 TS 解封装。
+     *
+     * 默认**不指定任何容器格式**，完全交给 libvlc 的 demux probe 现场判定，
+     * 这正是 VLC 官方客户端能同时播放 TS、HLS、AAC、MP3 的根本原因。
+     *
+     * @param forceTsDemux     仅在自动探测失败后的兜底轮次置 true，
+     *                         强制 `:demux=ts` 并附带 TS 时钟修正参数。
+     * @param useSoftwareDecoder 关闭 MediaCodec 硬解，强制走 libavcodec 软解。
      */
-    private fun playWithLibVlc(url: String, useSoftwareDecoder: Boolean = false) {
+    private fun playWithLibVlc(
+        url: String,
+        forceTsDemux: Boolean = false,
+        useSoftwareDecoder: Boolean = false
+    ) {
         // 切换电台时内部停止，不能顺带放弃音频焦点，否则刚申请的焦点会被自己释放掉
         stopAllPlayback(abandonFocus = false)
         requestAudioFocus()
@@ -537,27 +564,33 @@ class RadioPlayerService : Service() {
         } ?: return
 
         val player = vlcMediaPlayer ?: return
-        val isTs = isMpegTsStream(url)
 
         try {
             player.stop()
             val media = Media(vlc, Uri.parse(url)).apply {
+                // 硬解开关交给 VLC 自己权衡：内部即设置
+                // :codec=mediacodec_ndk,mediacodec_jni,none 或 :no-hw-dec
                 setHWDecoderEnabled(!useSoftwareDecoder, false)
                 addOption(":http-user-agent=$VLC_USER_AGENT")
-                addOption(":network-caching=2500")
-                addOption(":http-reconnect=true")
-                // 仅 MPEG-TS 强制解封装；HLS(.m3u8) 与 AAC/MP3 交给 VLC 自动识别
-                if (isTs) {
+                addOption(":network-caching=1500")
+                // 默认不加 :demux=。加任何 :demux 都会跳过 libvlc 的格式探测，
+                // 让本来能靠 probe 识别的流（HLS、MP4、AAC）直接解析失败。
+                if (forceTsDemux) {
                     addOption(":demux=ts")
-                    addOption(":ts-extra-pmt=1")
                     addOption(":ts-trust-pcr")
+                    addOption(":ts-extra-pmt=1")
                 }
             }
             player.media = media
             media.release()
             player.play()
 
-            val status = if (useSoftwareDecoder) "正在连接(软解)..." else "正在连接..."
+            val status = when {
+                forceTsDemux && useSoftwareDecoder -> "正在连接(TS 软解)..."
+                forceTsDemux -> "正在连接(TS)..."
+                useSoftwareDecoder -> "正在连接(软解)..."
+                else -> "正在连接..."
+            }
             updateNotification(status)
             broadcastStatus(status)
         } catch (e: Exception) {
@@ -567,23 +600,47 @@ class RadioPlayerService : Service() {
     }
 
     /**
-     * 播放异常自愈容灾：当硬解对特定广播音频流（如 MP2）不支持时，自动切换 LibVLC 软解
+     * 播放异常自愈。
+     *
+     * 按“先信任 libvlc 探测，再逐级加约束”的顺序重试，而不是一上来就猜格式：
+     *   第 0 轮：自动探测（默认，什么都不加）
+     *   第 1 轮：自动探测失败 → 猜测该流是自动识别不了的 TS，强制 :demux=ts 重试
+     *   第 2 轮：仍失败 → 强制 TS + 关硬解，走 libavcodec 软解（覆盖 MP2/MPEG-2 音频）
+     *   第 3 轮：仍失败 → 延时回到第 0 轮，重新走自动探测（应对源端临时故障）
      */
     private fun handleVlcPlaybackError() {
+        // libvlc 在解封装/网络同时失败时可能连续抛多个 EncounteredError，
+        // 若不防抖，重试轮次会被瞬间打满并开始空转。
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastErrorHandledAt < 2000L) return
+        lastErrorHandledAt = now
+
         val channel = playlistManager.getCurrentChannel() ?: return
         val cleanUrl = RadioRepository.sanitizeUrl(channel.streamUrl)
-        if (!hasTriedVlcSoftwareFallback) {
-            hasTriedVlcSoftwareFallback = true
-            Log.d(TAG, "硬解受限，自动切换至 LibVLC 原生软解模式...")
-            playWithLibVlc(cleanUrl, useSoftwareDecoder = true)
-        } else {
+        val nextStage = playbackAttempt + 1
+
+        if (nextStage > 2) {
+            // 三种策略都试过了，说明更像源端问题，延时后从自动探测重新开始
             val status = "正在重连..."
             updateNotification(status)
             broadcastStatus(status)
             mainHandler.postDelayed({
-                hasTriedVlcSoftwareFallback = false
-                playWithLibVlc(cleanUrl, useSoftwareDecoder = false)
-            }, 2500L)
+                playbackAttempt = 0
+                playWithLibVlc(cleanUrl)
+            }, 3000L)
+            return
+        }
+
+        playbackAttempt = nextStage
+        when (nextStage) {
+            1 -> {
+                Log.d(TAG, "自动探测失败，强制 TS 解封装重试")
+                playWithLibVlc(cleanUrl, forceTsDemux = true)
+            }
+            else -> {
+                Log.d(TAG, "强制 TS 仍失败，切换 LibVLC 原生软解重试")
+                playWithLibVlc(cleanUrl, forceTsDemux = true, useSoftwareDecoder = true)
+            }
         }
     }
 
