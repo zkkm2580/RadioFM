@@ -14,6 +14,10 @@ object RadioRepository {
     /**
      * 默认内置预设频道（来源与 http://zj.537224.xyz/radio.txt 保持一致）
      * 注意：喜马拉雅电台的 443 端口未开放，必须使用 http 协议
+     *
+     * 原内置的 4 个央广台（中国之声 / 经典音乐广播 / 经济之声 / 音乐之声，
+     * dg.881488.xyz:8168 的 TS 流）已移除：其 auth token 全部失效，
+     * 服务端返回 401 + HTML 登录页，播放必然失败。
      */
     fun getPresetChannels(): List<RadioChannel> = listOf(
         RadioChannel(
@@ -43,34 +47,6 @@ object RadioRepository {
             category = "网络电台",
             frequency = "网络台",
             streamUrl = "http://live.ximalaya.com/radio-first-page-app/live/1427/64.m3u8"
-        ),
-        RadioChannel(
-            id = "radio_5",
-            name = "中国之声",
-            category = "国家台",
-            frequency = "FM 106.1",
-            streamUrl = "http://dg.881488.xyz:8168/stream/channelid/767929144?auth=PoYyyJYz-DZDGwzaVSzKqA6BhE8o&profile=pass"
-        ),
-        RadioChannel(
-            id = "radio_6",
-            name = "经典音乐广播",
-            category = "国家台",
-            frequency = "FM 101.8",
-            streamUrl = "http://dg.881488.xyz:8168/stream/channelid/646411749?auth=PoYyyJYz-DZDGwzaVSzKqA6BhE8o&profile=pass"
-        ),
-        RadioChannel(
-            id = "radio_7",
-            name = "经济之声",
-            category = "国家台",
-            frequency = "FM 96.6",
-            streamUrl = "http://dg.881488.xyz:8168/stream/channelid/326940051?auth=PoYyyJYz-DZDGwzaVSzKqA6BhE8o&profile=pass"
-        ),
-        RadioChannel(
-            id = "radio_8",
-            name = "音乐之声",
-            category = "国家台",
-            frequency = "FM 90.0",
-            streamUrl = "http://dg.881488.xyz:8168/stream/channelid/1206573996?auth=PoYyyJYz-DZDGwzaVSzKqA6BhE8o&profile=pass"
         )
     )
 
