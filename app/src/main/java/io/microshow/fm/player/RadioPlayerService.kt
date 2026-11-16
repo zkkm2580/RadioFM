@@ -69,11 +69,36 @@ class RadioPlayerService : Service() {
     private var mediaSession: MediaSession? = null
     private lateinit var audioManager: AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
+    /**
+     * 是否已经申请并持有音频焦点。切台时若重复申请，系统会先回调旧 listener 的
+     * AUDIOFOCUS_LOSS（触发 pausePlayback），与新 listener 的 GAIN 打架，卡在"已暂停"。
+     */
+    private var audioFocusHeld = false
 
     private val playlistManager = PlaylistManager()
     private var lastStatusText: String = "就绪"
 
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * 音频焦点变化监听，全局复用同一个实例。
+     * 旧实现每次 requestAudioFocus 都 new 一个 listener/request：切台时系统会先给旧 listener
+     * 回调 AUDIOFOCUS_LOSS（→ pausePlayback），再给新 listener 回调 AUDIOFOCUS_GAIN
+     * （→ resumePlayback），两者互相打架，表现为"首个台正常、之后每切台就卡在已暂停"。
+     */
+    private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pausePlayback()
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                // 焦点恢复时直接恢复播放，不再重新申请焦点，避免嵌套回调。
+                // play() 对已在播放的状态是安全的空操作；状态由 Playing 事件统一纠正。
+                if (playlistManager.getCurrentChannel() != null) {
+                    vlcMediaPlayer?.play()
+                }
+            }
+        }
+    }
 
     companion object {
         private const val TAG = "RadioPlayerService"
@@ -416,38 +441,32 @@ class RadioPlayerService : Service() {
     }
 
     private fun requestAudioFocus(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        // 已持有焦点则直接复用，不再重复申请：重复申请会让旧 listener 先收到 AUDIOFOCUS_LOSS，
+        // 触发 pausePlayback() 把正在切台的新流暂停掉。切台/重试只需要焦点持续持有即可。
+        if (audioFocusHeld) return true
+
+        val granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val playbackAttributes = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_MEDIA)
                 .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                 .build()
-            val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            // 复用同一个 request 实例，避免每次切台 new 一个新 token 抢占焦点
+            val req = audioFocusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(playbackAttributes)
                 .setAcceptsDelayedFocusGain(true)
-                .setOnAudioFocusChangeListener { focusChange ->
-                    when (focusChange) {
-                        AudioManager.AUDIOFOCUS_LOSS -> pausePlayback()
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pausePlayback()
-                        AudioManager.AUDIOFOCUS_GAIN -> resumePlayback()
-                    }
-                }
-                .build()
-            audioFocusRequest = focusRequest
-            audioManager.requestAudioFocus(focusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+                .setOnAudioFocusChangeListener(audioFocusChangeListener)
+                .build().also { audioFocusRequest = it }
+            audioManager.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
         } else {
             @Suppress("DEPRECATION")
             audioManager.requestAudioFocus(
-                { focusChange ->
-                    when (focusChange) {
-                        AudioManager.AUDIOFOCUS_LOSS -> pausePlayback()
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> pausePlayback()
-                        AudioManager.AUDIOFOCUS_GAIN -> resumePlayback()
-                    }
-                },
+                audioFocusChangeListener,
                 AudioManager.STREAM_MUSIC,
                 AudioManager.AUDIOFOCUS_GAIN
             ) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
         }
+        audioFocusHeld = granted
+        return granted
     }
 
     private fun abandonAudioFocus() {
@@ -455,8 +474,9 @@ class RadioPlayerService : Service() {
             audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
         } else {
             @Suppress("DEPRECATION")
-            audioManager.abandonAudioFocus(null)
+            audioManager.abandonAudioFocus(audioFocusChangeListener)
         }
+        audioFocusHeld = false
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
