@@ -33,7 +33,7 @@ jobs:
     - name: 整理发布 APK 文件
       id: release_apk
       run: |
-        TAG_NAME="v1.2.1-$(date +'%Y%m%d%H%M')"
+        TAG_NAME="v1.2.2-$(date +'%Y%m%d%H%M')"
         echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
         mkdir -p release_dist
         # 同时保留中文名与 URL 安全名称，确保任意浏览器下载均不乱码
@@ -51,31 +51,32 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.release_apk.outputs.tag_name }}
-        name: FM网络收音机 v1.2.1 (${{ steps.release_apk.outputs.tag_name }})
+        name: FM网络收音机 v1.2.2 (${{ steps.release_apk.outputs.tag_name }})
         body: |
           ### FM网络收音机 (RadioFM) 更新说明
-          
+
           - 📻 **播放内核统一为 VideoLAN LibVLC，所有电台流一律由 VLC 播放**：
             - 不再按格式分流引擎：网络电台、HLS (`.m3u8`)、AAC/MP3、Tvheadend MPEG-TS 全部交由 LibVLC 解码，避免换源换引擎导致的“有的台能响、有的台不响”；
             - 默认不向 LibVLC 声明容器格式：解封装由 libvlc 自带的 demux probe 现场判定（TS 校验 0x47 同步字节与 188 字节包对齐，HLS 校验 `#EXTM3U` / `application/vnd.apple.mpegurl`），与 VLC 官方客户端机制一致，不再按 URL 猜格式；
-            - 硬解开关交给 `Media.setHWDecoderEnabled()`（等价 `:codec=mediacodec_ndk,mediacodec_jni,none`），移除全局非法的 `--codec=...all`；
-            - 三级容灾：自动探测失败 → 强制 `:demux=ts` 重试 → 强制 TS 并转 libavcodec 软解 → 延时回到自动探测；TS 专用参数只在兜底轮次出现；
-            - 网络缓冲收敛到 1500ms，避免直播流延迟持续堆积；UA 对齐官方式样 `VLC/3.0.23 LibVLC/3.0.23`；
-            - Media3 仅保留 `MediaSession` 车载会话所需的 Player 载体作用，不参与解码，同时移除 media3-exoplayer-hls / rtsp / ui 等冗余依赖；
-            - 增加软硬解智能容灾：当车载芯片 MediaCodec 硬解对 MP2/MPEG-2 音频不兼容报错时，自动毫秒级回退至 LibVLC 软解，确保 100% 能够出声！
+            - **修复大量源“点了不出声”的问题**：
+              - 解码器列表改为显式带软解兜底 `:codec=mediacodec_ndk,mediacodec_jni,avcodec,none`。LibVLC 3.6.5 的 `Media.setHWDecoderEnabled()` 实际拼出的是 `:codec=<硬解>,all`，`all` 不是有效模块名，等于丢掉软解兜底，MP2 / AC3 / HE-AAC(i) / OGG 编码就会「有信号、没声音」；
+              - 切台改为直接替换 media，去掉「先 `stop()` 再 `setMedia()`」。libvlc 的 stop 是异步的，紧跟其后的 setMedia 会被丢弃，表现为点了没反应、要再点一次；
+              - 容灾不再强制 `:demux=ts`：旧逻辑一旦首轮因网络抖动报错，后续就把 HLS / MP3 / AAC 源全部按 TS 解析，必然失败，于是所有非 TS 源都表现为一直重连；
+              - 解码容灾改为三档：硬解优先 → 全软解（`:codec=avcodec,none` + `:avcodec-hw=none`）→ 软解 + HLS 只选最低码率 + 缩短缓冲，仍失败则 3 秒后回到第一档；
+              - 新增 `--http-reconnect`（直播断流自动重连）与 `--no-video`（车机无 Surface 时避免 vout 初始化失败拖死整条流），缓冲 1500ms、兜底档降到 800ms；UA 对齐官方式样 `VLC/3.0.23 LibVLC/3.0.23`；
             - **优化屏显状态实时联动**：精准监听 LibVLC 播放事件与解码推进（TimeChanged），不再出现卡在“正在缓冲”的假状态。
-          
+
           - 🚗 **全面支持汽车方向盘换台与车载中控控制**：
             - 深度集成经典与现代 Android `MediaSession` 车载媒体会话协议；
             - 注册全局 `MediaButtonReceiver` 与车载专用切歌广播监听；
             - 自动请求与维护音频焦点（AudioFocus），方向盘上一曲/下一曲按键 100% 响应；
             - 通知栏升级为标准车载媒体控制样式（支持上一台/暂停/下一台）。
-          
+
           - 📍 **实时时钟与机车 5 秒高频准确定位天气**：
             - 播放界面时钟下方新增县市与实时天气一栏，字体大小与标题对齐（20sp）；
             - 采用 5 秒高频双轨动态刷新，机车行驶中实时捕获轨迹与跨区位移变化，即时更新当前县市；
             - 优先车载 GPS 硬件定位，无信号时平滑回退网络基站与 IP 兜底，内置车机无 GMS 专用逆地理引擎。
-          
+
           - 🌙 **深色/夜间模式自动跟随系统**：
             - 新增 DayNight 双套色彩与主题系统，汽车开大灯/夜间时界面自动切换为深色护眼模式。
         files: |
