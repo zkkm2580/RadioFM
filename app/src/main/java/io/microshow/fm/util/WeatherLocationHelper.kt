@@ -15,6 +15,8 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
+import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters
+import org.bouncycastle.crypto.signers.Ed25519Signer
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
@@ -48,6 +50,11 @@ class WeatherLocationHelper(
     private var lastWeatherFetchTime = 0L
     private var lastWeatherOk = false   // 上次天气请求是否成功，失败时缩短重试间隔
 
+    // JWT 缓存：一次签发在有效期内复用，避免每次天气刷新都做 Ed25519 签名
+    @Volatile
+    private var cachedJwt = ""
+    private var cachedJwtExpireAt = 0L
+
     private var activeGpsListener: LocationListener? = null
     private var activeNetworkListener: LocationListener? = null
 
@@ -69,9 +76,20 @@ class WeatherLocationHelper(
         private const val WEATHER_RETRY_INTERVAL_MS = 60 * 1000L        // 天气失败 1 分钟后重试
         private const val MIN_DISTANCE_METERS_FOR_GEOCODE = 150f        // 位移超 150 米重新解析区县
 
-        // 和风天气 Web 服务（新版鉴权）：专属 API Host + API Key，响应强制 gzip
+        // 和风天气 Web 服务（JWT 鉴权）：专属 API Host + Ed25519 动态签名，响应强制 gzip
         private const val QWEATHER_API_HOST = "km65nrb2n2.re.qweatherapi.com"
-        private const val QWEATHER_API_KEY = "7df315b4c7ee477f85debd8fed869b80"
+        // JWT Header.kid = 凭据ID
+        private const val QWEATHER_KID = "C5PU4P6GYQ"
+        // JWT Payload.iss = 开发者ID（Q 开头）
+        private const val QWEATHER_ISS = "Q968B3786C"
+        // JWT Payload.sub = 项目ID
+        private const val QWEATHER_SUB = "2E2DXH4Q3J"
+        // Ed25519 私钥（PKCS#8 DER 的 Base64，去掉 PEM 头尾标记）—— 用于 JWT 签名
+        // 注意：私钥明文内置于客户端，务必在和风控制台为该凭据设置 QPM 限额/请求来源限制
+        private const val QWEATHER_PRIVATE_KEY_B64 =
+            "MC4CAQAwBQYDK2VwBCIEIIY8xoJmixl9mOurdEHt16G8ba8PaExsveR0gvFEmHPn"
+        private const val JWT_VALID_MS = 14 * 60 * 1000L   // JWT 有效期 14 分钟（< 官方 24h 上限）
+        private const val JWT_EDDSA = "EdDSA"
     }
 
     /**
@@ -418,8 +436,49 @@ class WeatherLocationHelper(
     }
 
     /**
+     * 生成/复用和风天气 JWT（Ed25519 签名）。
+     * - Header:  {"alg":"EdDSA","kid":凭据ID}
+     * - Payload: {"iss":开发者ID,"sub":项目ID,"iat":now-30,"exp":now+14min}
+     * - 签名：PKCS#8 DER 的最后 32 字节即 Ed25519 种子，直接构造私钥签名
+     * - 使用 Android Base64 URL_SAFE|NO_PADDING|NO_WRAP（API 8+ 兼容，minSdk 21 可用）
+     */
+    @Synchronized
+    private fun getJwt(): String {
+        val now = System.currentTimeMillis()
+        if (cachedJwt.isNotEmpty() && now < cachedJwtExpireAt - 60_000L) {
+            return cachedJwt
+        }
+        val iat = now / 1000 - 30
+        val exp = (now + JWT_VALID_MS) / 1000
+
+        val header = "{\"alg\":\"$JWT_EDDSA\",\"kid\":\"$QWEATHER_KID\"}"
+        val payload = "{\"iss\":\"$QWEATHER_ISS\",\"sub\":\"$QWEATHER_SUB\",\"iat\":$iat,\"exp\":$exp}"
+
+        val flags = android.util.Base64.URL_SAFE or
+                android.util.Base64.NO_PADDING or
+                android.util.Base64.NO_WRAP
+        val h = android.util.Base64.encodeToString(header.toByteArray(Charsets.UTF_8), flags)
+        val p = android.util.Base64.encodeToString(payload.toByteArray(Charsets.UTF_8), flags)
+        val signingInput = "$h.$p"
+
+        // PKCS#8 Ed25519 私钥 DER 结构末尾 32 字节是 seed
+        val der = android.util.Base64.decode(QWEATHER_PRIVATE_KEY_B64, android.util.Base64.DEFAULT)
+        val seed = der.copyOfRange(der.size - 32, der.size)
+        val privateKey = Ed25519PrivateKeyParameters(seed, 0)
+        val signer = Ed25519Signer()
+        signer.init(true, privateKey)
+        val inputBytes = signingInput.toByteArray(Charsets.UTF_8)
+        signer.update(inputBytes, 0, inputBytes.size)
+        val sig = android.util.Base64.encodeToString(signer.generateSignature(), flags)
+
+        cachedJwt = "$signingInput.$sig"
+        cachedJwtExpireAt = now + JWT_VALID_MS
+        return cachedJwt
+    }
+
+    /**
      * 调用和风天气实况 API（v7/weather/now，按经纬度查询）。
-     * - 专属 API Host + X-QW-Api-Key 头鉴权；响应为 gzip，必须解压；
+     * - 专属 API Host + JWT（Authorization: Bearer）鉴权；响应为 gzip，必须解压；
      * - 返回 code=200 时取 now.text（中文天气）+ now.temp（温度）；
      * - 任何失败都改写兜底文案并标记失败，配合 1 分钟重试，杜绝永久"天气获取中"。
      */
@@ -432,9 +491,9 @@ class WeatherLocationHelper(
             val conn = URL(urlStr).openConnection() as HttpURLConnection
             conn.connectTimeout = 8000
             conn.readTimeout = 8000
-            conn.setRequestProperty("X-QW-Api-Key", QWEATHER_API_KEY)
+            conn.setRequestProperty("Authorization", "Bearer ${getJwt()}")
             conn.setRequestProperty("Accept-Encoding", "gzip")
-            conn.setRequestProperty("User-Agent", "RadioFM/1.2.4 (Android)")
+            conn.setRequestProperty("User-Agent", "RadioFM/1.2.5 (Android)")
 
             if (conn.responseCode == HttpURLConnection.HTTP_OK) {
                 // 和风强制 gzip 压缩，必须解压，否则 JSONObject 解析乱码/抛异常
