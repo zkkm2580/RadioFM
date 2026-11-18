@@ -11,8 +11,8 @@ android {
         applicationId = "io.nbhg.fm"
         minSdk = 21
         targetSdk = 34
-        versionCode = 8
-        versionName = "1.2.3"
+        versionCode = 9
+        versionName = "1.2.4-qweather"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
