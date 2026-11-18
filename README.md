@@ -1,4 +1,4 @@
-# 和风天气 FM 网络收音机(RadioFM) - 开源车载网络电台广播 App
+# 牛排火锅 FM 网络收音机(RadioFM) - 开源车载网络电台广播 App
 
 基于现代化 Android 技术栈构建的高性能车载网络收音机与电台广播流媒体播放器，专为汽车中控大屏与车机系统深度定制。
 
@@ -29,7 +29,22 @@
   - 5 秒高频双轨定位，优先硬件 GPS，隧道地库无信号时平滑回落网络基站，再以 IP 定位兜底；
   - 位移超过 150 米或跨区自动重新逆地理；系统 Geocoder 不可用时自动切换开源在线逆地理引擎，适配无 GMS 车机；
   - 天气数据取自**和风天气实况 API**（`v7/weather/now`，按经纬度查询），15 分钟刷新一次，失败后 1 分钟自动重试；
-  - 和风 Key 与专属 Host 写在 `WeatherLocationHelper.kt` 的 `QWEATHER_API_KEY` / `QWEATHER_API_HOST` 常量，可在和风控制台自行替换；请求失败时显示"天气暂不可用"兜底文案，不再无限停留"天气获取中"。
+  - 鉴权采用 **JWT（Ed25519 动态签名）**，App 内置私钥按官方规范即时签发（`iss` 开发者ID / `sub` 项目ID / `kid` 凭据ID），比明文 API Key 更安全；和风新版已限制 API Key 的每日额度，JWT 是官方推荐方式；
+  - JWT 三要素与私钥写在 `WeatherLocationHelper.kt` 的 `QWEATHER_ISS` / `QWEATHER_SUB` / `QWEATHER_KID` / `QWEATHER_PRIVATE_KEY_B64` 常量，专属 Host 为 `QWEATHER_API_HOST`；请求失败时显示"天气暂不可用"兜底文案，不再无限停留"天气获取中"。
+
+<details>
+<summary>Fork 后改成自己的和风天气（点击展开）</summary>
+
+1. 注册[和风天气控制台](https://console.qweather.com/)，新建项目，记下**项目ID**（填入 `QWEATHER_SUB`）；
+2. 在「设置」页查看你的**开发者ID**（Q 开头，填入 `QWEATHER_ISS`）；
+3. 用 `openssl genpkey -algorithm ED25519 -out ed25519-private.pem` 生成密钥对，`openssl pkey -pubout -in ed25519-private.pem > ed25519-public.pem`；
+4. 在项目下「创建凭据」→ 身份认证选 **JSON Web Token** → 粘贴公钥内容 → 保存，记下**凭据ID**（填入 `QWEATHER_KID`）；
+5. 把私钥 PEM 的首尾标记和换行去掉，只留 Base64 主体，填入 `QWEATHER_PRIVATE_KEY_B64`；
+6. API Host 在控制台项目/账号设置中查看，填入 `QWEATHER_API_HOST`。
+
+> 常见 401 排查：JWT 的 Payload 必须**同时**包含 `iss`（开发者ID）和 `sub`（项目ID），缺 `iss` 会鉴权失败；`kid` 必须是凭据ID 而非项目ID；三处 ID 与私钥公钥必须在同一和风账号下配对。可用控制台的「JWT 验证」工具粘贴 Token 自查。
+
+</details>
 
 - 🌙 **深色 / 夜间模式自动跟随系统**：
   - 内置 DayNight 双套主题与色彩规范；
@@ -82,3 +97,4 @@ app/src/main/java/io/microshow/fm/
 
 ---
 
+- 'QQ群:887679093'
