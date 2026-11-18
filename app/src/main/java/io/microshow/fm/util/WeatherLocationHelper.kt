@@ -18,6 +18,7 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
+import java.util.zip.GZIPInputStream
 import kotlin.concurrent.thread
 
 /**
@@ -45,6 +46,7 @@ class WeatherLocationHelper(
     private var lastGeocodedLon = 0.0
     private var lastGeocodeTime = 0L
     private var lastWeatherFetchTime = 0L
+    private var lastWeatherOk = false   // 上次天气请求是否成功，失败时缩短重试间隔
 
     private var activeGpsListener: LocationListener? = null
     private var activeNetworkListener: LocationListener? = null
@@ -63,8 +65,13 @@ class WeatherLocationHelper(
         private const val TAG = "WeatherLocationHelper"
         private const val POLL_INTERVAL_MS = 5000L         // 5 秒刷新一次定位
         private const val GPS_SIGNAL_TIMEOUT_MS = 8000L    // 8 秒无 GPS 信号视为失去 GPS
-        private const val WEATHER_REFRESH_INTERVAL_MS = 15 * 60 * 1000L // 天气 15 分钟刷新一次
+        private const val WEATHER_REFRESH_INTERVAL_MS = 15 * 60 * 1000L // 天气成功 15 分钟刷新一次
+        private const val WEATHER_RETRY_INTERVAL_MS = 60 * 1000L        // 天气失败 1 分钟后重试
         private const val MIN_DISTANCE_METERS_FOR_GEOCODE = 150f        // 位移超 150 米重新解析区县
+
+        // 和风天气 Web 服务（新版鉴权）：专属 API Host + API Key，响应强制 gzip
+        private const val QWEATHER_API_HOST = "km65nrb2n2.re.qweatherapi.com"
+        private const val QWEATHER_API_KEY = "7df315b4c7ee477f85debd8fed869b80"
     }
 
     /**
@@ -291,8 +298,9 @@ class WeatherLocationHelper(
             }
         }
 
-        // 检查天气刷新（首次或超过 15 分钟）
-        if (now - lastWeatherFetchTime > WEATHER_REFRESH_INTERVAL_MS) {
+        // 检查天气刷新：成功 15 分钟后刷新；失败则 1 分钟后重试，避免永久卡在"天气获取中"
+        val weatherInterval = if (lastWeatherOk) WEATHER_REFRESH_INTERVAL_MS else WEATHER_RETRY_INTERVAL_MS
+        if (now - lastWeatherFetchTime > weatherInterval) {
             lastWeatherFetchTime = now
             thread {
                 fetchWeather(lat, lon)
@@ -410,37 +418,64 @@ class WeatherLocationHelper(
     }
 
     /**
-     * 调用 Open-Meteo 开源气象服务
+     * 调用和风天气实况 API（v7/weather/now，按经纬度查询）。
+     * - 专属 API Host + X-QW-Api-Key 头鉴权；响应为 gzip，必须解压；
+     * - 返回 code=200 时取 now.text（中文天气）+ now.temp（温度）；
+     * - 任何失败都改写兜底文案并标记失败，配合 1 分钟重试，杜绝永久"天气获取中"。
      */
     private fun fetchWeather(lat: Double, lon: Double) {
+        var ok = false
         try {
-            val urlStr = "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,weather_code"
-                .format(Locale.US, lat, lon)
+            // 和风 location 参数是"经度,纬度"，与常见 latitude/longitude 顺序相反
+            val urlStr = "https://$QWEATHER_API_HOST/v7/weather/now?location=%.4f,%.4f&lang=zh"
+                .format(Locale.US, lon, lat)
             val conn = URL(urlStr).openConnection() as HttpURLConnection
-            conn.connectTimeout = 5000
-            conn.readTimeout = 5000
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Android) RadioFM")
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
+            conn.setRequestProperty("X-QW-Api-Key", QWEATHER_API_KEY)
+            conn.setRequestProperty("Accept-Encoding", "gzip")
+            conn.setRequestProperty("User-Agent", "RadioFM/1.2.4 (Android)")
 
             if (conn.responseCode == HttpURLConnection.HTTP_OK) {
-                val body = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                // 和风强制 gzip 压缩，必须解压，否则 JSONObject 解析乱码/抛异常
+                val stream = try {
+                    GZIPInputStream(conn.inputStream)
+                } catch (e: Exception) {
+                    conn.inputStream  // 万一未压缩则退回原始流
+                }
+                val body = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
                 val json = JSONObject(body)
-                val current = json.optJSONObject("current")
-                if (current != null) {
-                    val temp = current.optDouble("temperature_2m", Double.NaN)
-                    val code = current.optInt("weather_code", 0)
-                    val desc = parseWmoWeatherCode(code)
-
-                    lastWeatherText = if (!temp.isNaN()) {
-                        "$desc ${Math.round(temp)}°C"
-                    } else {
-                        desc
+                if (json.optString("code") == "200") {
+                    val now = json.optJSONObject("now")
+                    if (now != null) {
+                        val text = now.optString("text", "")
+                        val temp = now.optString("temp", "")
+                        if (text.isNotEmpty() || temp.isNotEmpty()) {
+                            lastWeatherText = when {
+                                text.isNotEmpty() && temp.isNotEmpty() -> "$text ${temp}°C"
+                                text.isNotEmpty() -> text
+                                else -> "${temp}°C"
+                            }
+                            ok = true
+                        }
                     }
-                    postUpdate()
+                } else {
+                    Log.w(TAG, "和风天气返回异常: code=${json.optString("code")}")
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "天气查询异常: ${e.message}")
         }
+
+        lastWeatherOk = ok
+        if (!ok) {
+            // 关键修复：失败时给出兜底文案而不是永远停在"天气获取中..."
+            // 若之前已有成功天气数据则保留旧值，仅首次失败时改为"天气暂不可用"
+            if (lastWeatherText == "天气获取中...") {
+                lastWeatherText = "天气暂不可用"
+            }
+        }
+        postUpdate()
     }
 
     private fun postUpdate() {
