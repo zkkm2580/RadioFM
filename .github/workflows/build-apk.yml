@@ -33,7 +33,7 @@ jobs:
     - name: 整理发布 APK 文件
       id: release_apk
       run: |
-        TAG_NAME="v1.2.3-$(date +'%Y%m%d%H%M')"
+        TAG_NAME="v1.2.4-qweather-$(date +'%Y%m%d%H%M')"
         echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
         mkdir -p release_dist
         cp app/build/outputs/apk/debug/*.apk "release_dist/FM网络收音机.apk"
@@ -50,13 +50,11 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.release_apk.outputs.tag_name }}
-        name: FM网络收音机 v1.2.3 (${{ steps.release_apk.outputs.tag_name }})
+        name: FM网络收音机 v1.2.4 和风天气版 (${{ steps.release_apk.outputs.tag_name }})
         body: |
           ### FM网络收音机 (RadioFM) 更新说明
 
-          > 修复版：修复首个频道能播、切到第 2/3 台起卡在「已暂停」的问题。根因是切台时每次都新建 AudioFocusRequest 并重复申请音频焦点，旧 listener 收到 AUDIOFOCUS_LOSS 触发 pausePlayback()，与新 listener 的 GAIN 回调互相打架，把正在切台的新流暂停。现改为复用同一焦点请求与监听器、已持有焦点则不重复申请。versionCode 为 8，可直接覆盖安装。
-
-          > v1.2.2 基线：基于反编译官方 VLC 客户端的一手结论整合，播放链路保持 v1.2.1（信任 libvlc demux probe、不强制格式），libvlc-all 升级到 3.7.1（内核 3.0.22-rc1 → 3.0.23 正式版，与官方同款），并修正 :codec=all 注释。
+          > 天气源改用和风天气：原 Open-Meteo 在国内网络间歇性不可达，导致天气一直停在「天气获取中...」。现改用和风天气实况 API（v7/weather/now，专属 Host + API Key 鉴权，响应 gzip 解压），中文天气更准；并修复失败后不改写文案、15 分钟内不重试的缺陷——成功 15 分钟刷新、失败 1 分钟重试、首次失败显示「天气暂不可用」。versionCode 为 9，可直接覆盖安装。
 
           - 播放内核统一为 VideoLAN LibVLC，所有电台流一律由 VLC 播放：
             - 不再按格式分流引擎：网络电台、HLS (.m3u8)、AAC/MP3、Tvheadend MPEG-TS 全部交由 LibVLC 解码；
