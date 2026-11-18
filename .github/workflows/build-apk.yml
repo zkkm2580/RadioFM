@@ -33,7 +33,7 @@ jobs:
     - name: 整理发布 APK 文件
       id: release_apk
       run: |
-        TAG_NAME="v1.2.4-qweather-$(date +'%Y%m%d%H%M')"
+        TAG_NAME="v1.2.5-jwt-$(date +'%Y%m%d%H%M')"
         echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
         mkdir -p release_dist
         cp app/build/outputs/apk/debug/*.apk "release_dist/FM网络收音机.apk"
@@ -50,11 +50,11 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.release_apk.outputs.tag_name }}
-        name: FM网络收音机 v1.2.4 和风天气版 (${{ steps.release_apk.outputs.tag_name }})
+        name: FM网络收音机 v1.2.5 JWT天气版 (${{ steps.release_apk.outputs.tag_name }})
         body: |
           ### FM网络收音机 (RadioFM) 更新说明
 
-          > 天气源改用和风天气：原 Open-Meteo 在国内网络间歇性不可达，导致天气一直停在「天气获取中...」。现改用和风天气实况 API（v7/weather/now，专属 Host + API Key 鉴权，响应 gzip 解压），中文天气更准；并修复失败后不改写文案、15 分钟内不重试的缺陷——成功 15 分钟刷新、失败 1 分钟重试、首次失败显示「天气暂不可用」。versionCode 为 9，可直接覆盖安装。
+          > 天气鉴权升级为 JWT：和风天气新版已限制 API Key 每日额度，且官方推荐 JWT。本版弃用明文 API Key，改为 App 内置 Ed25519 私钥按官方规范即时签发 JWT（Payload 含 iss 开发者ID / sub 项目ID，Header 带 kid 凭据ID），响应 gzip 解压，兼容 minSdk 21（BouncyCastle 签名）。此前 401 的根因是 Payload 缺少 iss 字段及三处 ID 与凭据公钥未配对，已彻底修正。保留失败兜底与重试：成功 15 分钟刷新、失败 1 分钟重试、首次失败显示「天气暂不可用」。versionCode 为 10，可直接覆盖安装。
 
           - 播放内核统一为 VideoLAN LibVLC，所有电台流一律由 VLC 播放：
             - 不再按格式分流引擎：网络电台、HLS (.m3u8)、AAC/MP3、Tvheadend MPEG-TS 全部交由 LibVLC 解码；
