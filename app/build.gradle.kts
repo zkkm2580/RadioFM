@@ -11,8 +11,8 @@ android {
         applicationId = "io.nbhg.fm"
         minSdk = 21
         targetSdk = 34
-        versionCode = 9
-        versionName = "1.2.4-qweather"
+        versionCode = 10
+        versionName = "1.2.5-jwt"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
@@ -59,4 +59,7 @@ dependencies {
     // 3.7.1 对应内核 LibVLC 3.0.23 正式版（3.6.5 对应的是 3.0.22-rc1 候选版），
     // 与官方 VLC 3.7.1 客户端同款；TS/HLS demux 由内核 probe 负责，版本对齐可修复 RC 版缺陷。
     implementation("org.videolan.android:libvlc-all:3.7.1")
+
+    // BouncyCastle 轻量加密库：和风天气 JWT 的 Ed25519 签名（Android minSdk 21 无原生 EdDSA，需 API 33+）
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78")
 }
